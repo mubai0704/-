@@ -144,7 +144,7 @@ export default function App() {
   const initIndexMember = () => {
     const indexMember: Member = {
       id: 'index-member',
-      name: '案主',
+      name: '',
       gender: 'male',
       x: window.innerWidth / 2,
       y: window.innerHeight / 2,
@@ -236,7 +236,7 @@ export default function App() {
 
     const newPartner: Member = {
       id: Math.random().toString(36).substr(2, 9),
-      name: fromMember.gender === 'male' ? '配偶 (女)' : '配偶 (男)',
+      name: '',
       gender: fromMember.gender === 'male' ? 'female' : 'male',
       x: fromMember.x + offset,
       y: fromMember.y,
@@ -265,7 +265,7 @@ export default function App() {
 
     const father: Member = {
       id: Math.random().toString(36).substr(2, 9),
-      name: '父親',
+      name: '',
       gender: 'male',
       x: child.x - 75,
       y: child.y - 150,
@@ -273,7 +273,7 @@ export default function App() {
 
     const mother: Member = {
       id: Math.random().toString(36).substr(2, 9),
-      name: '母親',
+      name: '',
       gender: 'female',
       x: child.x + 75,
       y: child.y - 150,
@@ -328,7 +328,7 @@ export default function App() {
     for (let i = 0; i < count; i++) {
       const member: Member = {
         id: Math.random().toString(36).substr(2, 9),
-        name: '子女',
+        name: '',
         gender: 'male',
         x: startX + i * spacing,
         y: targetY,
@@ -363,7 +363,7 @@ export default function App() {
       // If member doesn't have parents, create parents first, then add a sibling
       const father: Member = {
         id: Math.random().toString(36).substr(2, 9),
-        name: '父親',
+        name: '',
         gender: 'male',
         x: member.x - 75,
         y: member.y - 150,
@@ -371,7 +371,7 @@ export default function App() {
 
       const mother: Member = {
         id: Math.random().toString(36).substr(2, 9),
-        name: '母親',
+        name: '',
         gender: 'female',
         x: member.x + 75,
         y: member.y - 150,
@@ -392,7 +392,7 @@ export default function App() {
 
       const sibling: Member = {
         id: Math.random().toString(36).substr(2, 9),
-        name: '手足',
+        name: '',
         gender: 'male',
         x: member.x + 150,
         y: member.y,
@@ -635,14 +635,19 @@ export default function App() {
       const stage = stageRef.current;
       const layer = stage.getLayers()[0];
       
+      // Get the bounding box of all content in the layer (screen space)
+      const box = layer.getClientRect();
+      
+      // Get the bounding box relative to the layer (local space)
+      const layerBox = layer.getClientRect({ relativeTo: layer });
+      
       let bg: any = null;
       if (exportWithBackground) {
-        const box = stage.getClientRect();
         bg = new Konva.Rect({
-          x: box.x - 50,
-          y: box.y - 50,
-          width: box.width + 100,
-          height: box.height + 100,
+          x: layerBox.x - 50,
+          y: layerBox.y - 50,
+          width: layerBox.width + 100,
+          height: layerBox.height + 100,
           fill: 'white',
           listening: false,
         });
@@ -651,6 +656,10 @@ export default function App() {
       }
 
       const uri = stage.toDataURL({
+        x: box.x - 50,
+        y: box.y - 50,
+        width: box.width + 100,
+        height: box.height + 100,
         pixelRatio: 2,
       });
 
@@ -1507,7 +1516,7 @@ export default function App() {
                 {member.note && (
                   <Text
                     text={member.note}
-                    fontSize={10}
+                    fontSize={14}
                     fontFamily="Inter"
                     fill="#71717a"
                     align="center"
