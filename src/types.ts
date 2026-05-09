@@ -34,4 +34,13 @@ export interface GenogramData {
   members: Member[];
   unions: Union[];
   children: Child[];
+  lines?: any[];
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  data: GenogramData;
+  createdAt: number;
+  updatedAt: number;
 }

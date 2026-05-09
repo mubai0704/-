@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Konva from 'konva';
 import { Stage, Layer, Rect, Circle, Line, Text, Group, RegularPolygon } from 'react-konva';
-import { Member, Union, Child, UnionType, Gender } from './types';
-import { User, UserPlus, Trash2, Heart, Baby, Settings2, Download, Plus, Users, XCircle, Split, Link2, Undo2, RotateCcw, ZoomIn, ZoomOut, Maximize, Check, X, Pencil, MousePointer2, Eraser } from 'lucide-react';
+import { Member, Union, Child, UnionType, Gender, Project } from './types';
+import { User, UserPlus, Trash2, Heart, Baby, Settings2, Download, Plus, Users, XCircle, Split, Link2, Undo2, RotateCcw, ZoomIn, ZoomOut, Maximize, Check, X, Pencil, MousePointer2, Eraser, FolderOpen, Save, FilePlus, Edit3, ScanLine, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { recognizeGenogramFromImage } from './services/aiService';
 
 const MEMBER_SIZE = 60;
 const GRID_SIZE = 20;
@@ -20,37 +21,214 @@ export default function App() {
   const [scale, setScale] = useState(1);
   const [position, setPosition] = useState({ x: 0, y: 0 });
   const [exportWithBackground, setExportWithBackground] = useState(true);
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const [projectToDelete, setProjectToDelete] = useState<string | null>(null);
+  const [draftData, setDraftData] = useState<{members: Member[], unions: Union[], children: Child[], lines: any[]} | null>(null);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [isProjectModalOpen, setIsProjectModalOpen] = useState(false);
+  const [isAiParsing, setIsAiParsing] = useState(false);
+  const [newProjectName, setNewProjectName] = useState('');
+  const [lines, setLines] = useState<any[]>([]);
   const containerRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<any>(null);
 
-  // Initialize with one member if empty
+  // Initialize
   useEffect(() => {
-    const saved = localStorage.getItem('genogram-data-v2');
-    if (saved) {
+    const savedProjects = localStorage.getItem('genogram-projects');
+    const lastActiveId = localStorage.getItem('genogram-active-project-id');
+    const savedDraft = localStorage.getItem('genogram-draft');
+    
+    let loadedProjects: Project[] = [];
+    if (savedProjects) {
       try {
-        const { members: m, unions: u, children: c, lines: l } = JSON.parse(saved);
-        setMembers(m);
-        setUnions(u);
-        setChildren(c);
-        if (l) setLines(l);
+        loadedProjects = JSON.parse(savedProjects);
+        setProjects(loadedProjects);
       } catch (e) {
-        console.error('Failed to load data', e);
-        initIndexMember();
+        console.error('Failed to load projects', e);
       }
+    }
+
+    if (savedDraft) {
+      try {
+        setDraftData(JSON.parse(savedDraft));
+      } catch (e) {}
+    }
+    
+    if (lastActiveId === 'draft' || !lastActiveId) {
+      switchToDraft();
     } else {
-      initIndexMember();
+      const activeProject = loadedProjects.find(p => p.id === lastActiveId);
+      if (activeProject) {
+        loadProjectData(activeProject);
+      } else {
+        switchToDraft();
+      }
     }
   }, []);
 
-  const [isStrictOrthogonal, setIsStrictOrthogonal] = useState(true);
+  const switchToDraft = () => {
+    const savedDraft = localStorage.getItem('genogram-draft');
+    if (savedDraft) {
+      try {
+        const data = JSON.parse(savedDraft);
+        setMembers(data.members || []);
+        setUnions(data.unions || []);
+        setChildren(data.children || []);
+        setLines(data.lines || []);
+      } catch (e) {
+        initDraft();
+      }
+    } else {
+      initDraft();
+    }
+    setActiveProjectId(null);
+    localStorage.setItem('genogram-active-project-id', 'draft');
+    setHistory([]);
+    setSelectedId(null);
+    setSelectedUnionId(null);
+  };
+
+  const initDraft = () => {
+    setMembers([{
+      id: 'index-member',
+      name: '',
+      gender: 'male',
+      x: window.innerWidth / 2,
+      y: window.innerHeight / 2,
+      isIndex: true,
+    }]);
+    setUnions([]);
+    setChildren([]);
+    setLines([]);
+  };
+
+  const loadProjectData = (project: Project) => {
+    setActiveProjectId(project.id);
+    setMembers(project.data.members);
+    setUnions(project.data.unions);
+    setChildren(project.data.children);
+    setLines(project.data.lines || []);
+    setHistory([]);
+    localStorage.setItem('genogram-active-project-id', project.id);
+  };
+
+  const loadProject = (id: string) => {
+    const project = projects.find(p => p.id === id);
+    if (!project) return;
+    loadProjectData(project);
+    setIsProjectModalOpen(false);
+  };
+
+  const createNewProject = (name: string) => {
+    const defaultData = {
+      members: [{
+        id: 'index-member',
+        name: '',
+        gender: 'male' as Gender,
+        x: window.innerWidth / 2,
+        y: window.innerHeight / 2,
+        isIndex: true,
+      }],
+      unions: [],
+      children: [],
+      lines: []
+    };
+    
+    const newProject: Project = {
+      id: 'project-' + Date.now(),
+      name: name || '未命名家庭',
+      data: defaultData,
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+    
+    const updatedProjects = [...projects, newProject];
+    setProjects(updatedProjects);
+    loadProjectData(newProject);
+    
+    localStorage.setItem('genogram-projects', JSON.stringify(updatedProjects));
+    setIsProjectModalOpen(false);
+    setNewProjectName('');
+  };
+
+  const deleteProject = (id: string) => {
+    setProjects(prev => {
+      const updated = prev.filter(p => p.id !== id);
+      localStorage.setItem('genogram-projects', JSON.stringify(updated));
+      return updated;
+    });
+    
+    if (activeProjectId === id) {
+      switchToDraft();
+    }
+    setProjectToDelete(null);
+  };
+
+  const renameProject = (id: string, newName: string) => {
+    if (!newName || !newName.trim()) return;
+    const updatedProjects = projects.map(p => 
+      p.id === id ? { ...p, name: newName, updatedAt: Date.now() } : p
+    );
+    setProjects(updatedProjects);
+    localStorage.setItem('genogram-projects', JSON.stringify(updatedProjects));
+  };
+
+  const saveCurrentToNewProject = () => {
+    const name = prompt('輸入新家庭名稱', '從草稿儲存的家庭');
+    if (!name) return;
+
+    const newProject: Project = {
+      id: 'project-' + Date.now(),
+      name: name,
+      data: { members, unions, children, lines },
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+
+    const updatedProjects = [...projects, newProject];
+    setProjects(updatedProjects);
+    setActiveProjectId(newProject.id);
+    localStorage.setItem('genogram-projects', JSON.stringify(updatedProjects));
+    localStorage.setItem('genogram-active-project-id', newProject.id);
+    alert('已成功儲存為新家庭！');
+  };
+
+  // Component States
   const [tool, setTool] = useState<'select' | 'pen' | 'eraser'>('select');
-  const [lines, setLines] = useState<any[]>([]);
   const [cursorPos, setCursorPos] = useState<{ x: number, y: number } | null>(null);
   const isDrawing = useRef(false);
+  const [isStrictOrthogonal, setIsStrictOrthogonal] = useState(true);
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [lastSavedPulse, setLastSavedPulse] = useState(false);
 
+  // Manual save function
+  const saveChanges = () => {
+    if (activeProjectId && activeProjectId !== 'draft') {
+      const updatedProjects = projects.map(p => {
+        if (p.id === activeProjectId) {
+          return {
+            ...p,
+            data: { members, unions, children, lines },
+            updatedAt: Date.now()
+          };
+        }
+        return p;
+      });
+      setProjects(updatedProjects);
+      localStorage.setItem('genogram-projects', JSON.stringify(updatedProjects));
+    } else {
+      const draftData = { members, unions, children, lines };
+      localStorage.setItem('genogram-draft', JSON.stringify(draftData));
+    }
+    setHasUnsavedChanges(false);
+    setLastSavedPulse(true);
+    setTimeout(() => setLastSavedPulse(false), 2000);
+  };
+
+  // Track changes to mark as unsaved
   useEffect(() => {
     if (members.length > 0) {
-      localStorage.setItem('genogram-data-v2', JSON.stringify({ members, unions, children, lines }));
+      setHasUnsavedChanges(true);
     }
   }, [members, unions, children, lines]);
 
@@ -72,8 +250,7 @@ export default function App() {
     setLines(lastState.lines || []);
     setHistory(prev => prev.slice(0, -1));
     
-    // Update localStorage immediately
-    localStorage.setItem('genogram-data-v2', JSON.stringify(lastState));
+    // Update project state will be handled by the useEffect sync
   };
 
   const handleMouseDown = (e: any) => {
@@ -159,6 +336,50 @@ export default function App() {
     setPosition({ x: 0, y: 0 });
   };
 
+  const handleAiRecognize = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsAiParsing(true);
+    try {
+      const reader = new FileReader();
+      reader.onload = async (event) => {
+        const base64 = event.target?.result as string;
+        const result = await recognizeGenogramFromImage(base64, file.type);
+        
+        if (result && result.members) {
+          // Adjust coordinates to be relative to the center of the current view
+          const viewCenter = {
+            x: window.innerWidth / 2,
+            y: window.innerHeight / 2
+          };
+
+          // Scale from AI coordinates (0-1000) to actual canvas coordinates
+          // Centering the reconocized structure
+          const scaledMembers = result.members.map(m => ({
+            ...m,
+            x: (m.x / 1000) * 800 + (viewCenter.x - 400),
+            y: (m.y / 1000) * 800 + (viewCenter.y - 400),
+          }));
+
+          setMembers(scaledMembers);
+          setUnions(result.unions || []);
+          setChildren(result.children || []);
+          setLines([]); // Reset free lines
+          
+          alert('AI 辨識完成！已自動載入家系圖結構。您現在可以繼續編輯。');
+        }
+      };
+      reader.readAsDataURL(file);
+    } catch (error) {
+      console.error('AI Recognition failed:', error);
+      alert('AI 辨識失敗，請稍後再試或換一張圖片。');
+    } finally {
+      setIsAiParsing(false);
+      if (e.target) e.target.value = ''; // Reset input
+    }
+  };
+
   const handleWheel = (e: any) => {
     if (isDrawing.current) return; // Disable zoom while actively drawing
     e.evt.preventDefault();
@@ -209,7 +430,7 @@ export default function App() {
   };
 
   useEffect(() => {
-    localStorage.setItem('genogram-data-v2', JSON.stringify({ members, unions, children }));
+    // Current state is synced to projects in the other useEffect
   }, [members, unions, children]);
 
   useEffect(() => {
@@ -679,32 +900,123 @@ export default function App() {
   const [showConfirmReset, setShowConfirmReset] = useState(false);
 
   const newFile = () => {
-    setMembers([]);
-    setUnions([]);
-    setChildren([]);
-    setLines([]);
+    // Determine center coordinates
+    const centerX = (dimensions.width > 0 ? dimensions.width : window.innerWidth) / 2;
+    const centerY = (dimensions.height > 0 ? dimensions.height : window.innerHeight) / 2;
+
+    const resetData = {
+      members: [{
+        id: 'index-member',
+        name: '',
+        gender: 'male' as Gender,
+        x: centerX,
+        y: centerY,
+        isIndex: true,
+      }],
+      unions: [],
+      children: [],
+      lines: []
+    };
+
+    // Update current working state
+    setMembers(resetData.members);
+    setUnions(resetData.unions);
+    setChildren(resetData.children);
+    setLines(resetData.lines);
     setHistory([]);
-    setSelectedId(null);
+    setSelectedId('index-member');
     setSelectedUnionId(null);
     setScale(1);
     setPosition({ x: 0, y: 0 });
-    localStorage.removeItem('genogram-data-v2');
     setShowConfirmReset(false);
+
+    // Also immediately push to project list and storage to be absolutely sure
+    if (activeProjectId) {
+      setProjects(prevProjects => {
+        const updatedProjects = prevProjects.map(p => {
+          if (p.id === activeProjectId) {
+            return {
+              ...p,
+              data: resetData,
+              updatedAt: Date.now()
+            };
+          }
+          return p;
+        });
+        localStorage.setItem('genogram-projects', JSON.stringify(updatedProjects));
+        return updatedProjects;
+      });
+    }
   };
 
   const selectedMember = members.find(m => m.id === selectedId);
   const selectedUnion = unions.find(u => u.id === selectedUnionId);
 
   return (
-    <div className="flex h-screen w-screen bg-zinc-50 font-sans overflow-hidden">
+    <>
+      <div className="flex h-screen w-screen bg-zinc-50 font-sans overflow-hidden">
       {/* Sidebar */}
       <div className="w-80 bg-white border-r border-zinc-200 flex flex-col shadow-sm z-10">
-        <div className="p-6 border-b border-zinc-100">
-          <h1 className="text-xl font-bold tracking-tight text-zinc-900 flex items-center gap-2">
-            <Settings2 className="w-5 h-5 text-indigo-600" />
-            家系圖繪製工具
-          </h1>
-          <p className="text-[10px] text-zinc-500 mt-1 uppercase tracking-widest font-bold">Genogram Creator</p>
+        
+        {/* Compact Header & Mode Selector */}
+        <div className="bg-white border-b border-zinc-100 flex flex-col pt-4 pb-2 px-4 gap-3">
+          <div className="flex items-center gap-2 pb-1">
+            <Settings2 className="w-4 h-4 text-indigo-600" />
+            <span className="text-sm font-bold tracking-tight text-zinc-900">家系圖繪製</span>
+          </div>
+
+          <div className="flex p-0.5 bg-zinc-100 rounded-lg">
+            <button 
+              onClick={switchToDraft}
+              className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-md text-[11px] font-bold transition-all ${!activeProjectId ? 'bg-white text-indigo-600 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
+            >
+              <Pencil className="w-3 h-3" />
+              隨手記
+            </button>
+            <button 
+              onClick={() => setIsProjectModalOpen(true)}
+              className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-md text-[11px] font-bold transition-all ${activeProjectId ? 'bg-white text-indigo-600 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
+            >
+              <FolderOpen className="w-3 h-3" />
+              案家管理中心
+            </button>
+          </div>
+        </div>
+
+        {/* Compact Context Bar */}
+        <div className="px-4 py-2 border-b border-zinc-100 bg-zinc-50/30 flex items-center justify-between min-h-[44px]">
+          <div className="flex items-center gap-2 min-w-0 flex-1">
+            <div className={`p-1 rounded ${activeProjectId ? 'bg-indigo-100 text-indigo-600' : 'bg-zinc-200 text-zinc-500'}`}>
+              {activeProjectId ? <FolderOpen className="w-3 h-3" /> : <Pencil className="w-3 h-3" />}
+            </div>
+            <span className={`text-[11px] font-bold truncate ${activeProjectId ? 'text-indigo-900' : 'text-zinc-600'}`}>
+              {activeProjectId ? (projects.find(p => p.id === activeProjectId)?.name || '未命名家庭') : '正在使用草稿'}
+            </span>
+          </div>
+          
+          <div className="flex items-center gap-1">
+            {!activeProjectId ? (
+              <button 
+                onClick={saveCurrentToNewProject}
+                className="text-indigo-600 hover:text-indigo-700 text-[10px] font-bold flex items-center gap-1 bg-white border border-indigo-100 px-2 py-1 rounded shadow-sm hover:shadow"
+              >
+                <Save className="w-2.5 h-2.5" />
+                儲存
+              </button>
+            ) : (
+              <button 
+                 onClick={() => {
+                   const currentProject = projects.find(p => p.id === activeProjectId);
+                   const newName = prompt('重新命名家庭', currentProject?.name);
+                   if (newName && activeProjectId) renameProject(activeProjectId, newName);
+                 }}
+                 className="p-1 text-zinc-400 hover:text-indigo-600 hover:bg-white rounded transition-all"
+                 title="重新命名"
+              >
+                <Edit3 className="w-3 h-3" />
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-6">
@@ -953,38 +1265,6 @@ export default function App() {
               </div>
             </motion.section>
           )}
-
-          <section className="pt-4 border-t border-zinc-100">
-            <h2 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-3 px-2">圖表設定</h2>
-            <div className="space-y-3 px-2">
-              <div className="flex items-center justify-between">
-                <label htmlFor="strict-ortho" className="text-xs font-medium text-zinc-600 cursor-pointer">禁止摺疊線條 (強制垂直)</label>
-                <button
-                  id="strict-ortho"
-                  onClick={() => setIsStrictOrthogonal(!isStrictOrthogonal)}
-                  className={`w-10 h-5 rounded-full transition-colors relative ${isStrictOrthogonal ? 'bg-indigo-600' : 'bg-zinc-200'}`}
-                >
-                  <div className={`absolute top-1 w-3 h-3 bg-white rounded-full transition-all ${isStrictOrthogonal ? 'left-6' : 'left-1'}`} />
-                </button>
-              </div>
-              <div className="bg-indigo-50/50 rounded-lg p-2 border border-indigo-100/50">
-                <p className="text-[10px] text-indigo-600 leading-tight">
-                  開啟後，系統將強制父母中心點與子女中心點保持垂直對齊，完全消除階梯狀摺疊線。
-                </p>
-              </div>
-            </div>
-          </section>
-
-          <section className="pt-4 border-t border-zinc-100">
-            <h2 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider mb-3 px-2">使用說明</h2>
-            <div className="bg-zinc-50 rounded-xl p-3 border border-zinc-100 space-y-2">
-              <p className="text-[11px] text-zinc-600 leading-relaxed">
-                1. 點擊成員符號：可修改姓名、性別或新增配偶。<br/>
-                2. 點擊關係線段：可修改關係類型（結婚、同居等）或新增子女。<br/>
-                3. 拖曳符號：可自由調整家系圖位置。
-              </p>
-            </div>
-          </section>
         </div>
 
         <div className="p-4 border-t border-zinc-100 bg-zinc-50/50 space-y-2">
@@ -1055,6 +1335,33 @@ export default function App() {
         <div ref={containerRef} className="flex-1 relative canvas-container overflow-hidden">
           {/* Tool Switcher */}
           <div className="absolute top-6 left-6 z-10 flex gap-2">
+            <div className="relative">
+              <input 
+                type="file" 
+                id="ai-image-upload" 
+                className="hidden" 
+                accept="image/*"
+                onChange={handleAiRecognize}
+                disabled={isAiParsing}
+              />
+              <label 
+                htmlFor="ai-image-upload"
+                className={`flex items-center gap-2 px-4 py-2 rounded-xl transition-all shadow-lg font-medium border cursor-pointer ${
+                  isAiParsing 
+                    ? 'bg-zinc-50 text-zinc-400 border-zinc-200' 
+                    : 'bg-white text-indigo-600 border-zinc-200 hover:bg-zinc-50 hover:border-indigo-100 hover:shadow-indigo-50'
+                }`}
+                title="AI 圖片辨識掃描"
+              >
+                {isAiParsing ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <ScanLine className="w-4 h-4" />
+                )}
+                <span className="text-xs">{isAiParsing ? '辨識中...' : 'AI 辨識'}</span>
+              </label>
+            </div>
+
             <button
               onClick={() => setTool('select')}
               className={`flex items-center gap-2 px-4 py-2 rounded-xl transition-all shadow-lg font-medium border ${
@@ -1100,6 +1407,40 @@ export default function App() {
                 <XCircle className="w-4 h-4" />
                 <span className="text-xs">全部清除</span>
               </button>
+            )}
+          </div>
+
+          {/* Action Toolbar - Right */}
+          <div className="absolute top-6 right-6 z-10 flex flex-col items-end gap-2">
+             <button 
+              onClick={saveChanges}
+              className={`flex items-center gap-2 px-5 py-2.5 rounded-xl font-bold text-sm transition-all shadow-lg border ${
+                hasUnsavedChanges 
+                ? 'bg-indigo-600 text-white border-indigo-500 shadow-indigo-100 hover:bg-indigo-700' 
+                : 'bg-white text-emerald-600 border-zinc-200 shadow-sm'
+              }`}
+            >
+              {lastSavedPulse ? (
+                <>
+                  <Check className="w-4 h-4" />
+                  已儲存
+                </>
+              ) : (
+                <>
+                  <Save className={`w-4 h-4 ${hasUnsavedChanges ? 'animate-pulse' : ''}`} />
+                  {hasUnsavedChanges ? '儲存當前變更' : '資料已儲存'}
+                </>
+              )}
+            </button>
+            {hasUnsavedChanges && (
+              <motion.div 
+                initial={{ opacity: 0, x: 20 }}
+                animate={{ opacity: 1, x: 0 }}
+                className="bg-amber-50 border border-amber-100 px-3 py-1.5 rounded-lg shadow-sm flex items-center gap-1.5"
+              >
+                <span className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-pulse" />
+                <span className="text-[10px] text-amber-600 font-bold uppercase tracking-tight">尚未儲存變更</span>
+              </motion.div>
             )}
           </div>
 
@@ -1516,13 +1857,14 @@ export default function App() {
                 {member.note && (
                   <Text
                     text={member.note}
-                    fontSize={14}
+                    fontSize={18}
                     fontFamily="Inter"
-                    fill="#71717a"
+                    fill="#000000"
+                    fontStyle="bold"
                     align="center"
-                    width={MEMBER_SIZE * 2}
-                    offsetX={MEMBER_SIZE}
-                    y={MEMBER_SIZE / 2 + 26}
+                    width={MEMBER_SIZE * 3}
+                    offsetX={MEMBER_SIZE * 1.5}
+                    y={MEMBER_SIZE / 2 + 30}
                   />
                 )}
               </Group>
@@ -1559,5 +1901,200 @@ export default function App() {
         </Stage>
       </div>
     </div>
+
+      {/* Project Management Modal */}
+      <AnimatePresence>
+        {isProjectModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 text-zinc-900">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsProjectModalOpen(false)}
+              className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-lg bg-white rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[80vh]"
+            >
+              <div className="p-6 border-b border-zinc-100 flex items-center justify-between bg-zinc-50/50">
+                <div>
+                  <h2 className="text-xl font-bold text-zinc-900">家庭管理中心</h2>
+                  <p className="text-xs text-zinc-500 mt-1">在這裡管理您的所有家系圖家庭</p>
+                </div>
+                <button 
+                  onClick={() => setIsProjectModalOpen(false)}
+                  className="p-2 hover:bg-zinc-200 rounded-full transition-colors"
+                >
+                  <X className="w-5 h-5 text-zinc-400" />
+                </button>
+              </div>
+
+              <div className="p-6 overflow-y-auto flex-1 space-y-8">
+                {/* Draft Option */}
+                <div 
+                  onClick={switchToDraft}
+                  className={`group flex items-center gap-4 p-4 rounded-2xl border transition-all cursor-pointer ${
+                    !activeProjectId 
+                      ? 'bg-amber-50 border-amber-200 ring-1 ring-amber-200 shadow-sm' 
+                      : 'bg-zinc-50 border-zinc-200 hover:border-zinc-300'
+                  }`}
+                >
+                  <div className={`p-3 rounded-xl transition-colors ${!activeProjectId ? 'bg-amber-500 text-white shadow-md shadow-amber-100' : 'bg-white text-zinc-400'}`}>
+                    <Pencil className="w-5 h-5" />
+                  </div>
+                  <div className="flex-1">
+                    <h4 className="font-bold text-zinc-900">隨意繪製 (我的草案)</h4>
+                    <p className="text-xs text-zinc-500 mt-0.5">適合臨時繪製，不會儲存為正式家庭</p>
+                  </div>
+                  {!activeProjectId && (
+                    <div className="text-amber-600 pr-1">
+                      <Check className="w-5 h-5" />
+                    </div>
+                  )}
+                </div>
+
+                {/* New Project Input */}
+                <div className="space-y-3 bg-zinc-50 p-4 rounded-2xl border border-zinc-100">
+                  <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest px-1">建立家庭</label>
+                  <div className="flex gap-2">
+                    <input 
+                      type="text" 
+                      value={newProjectName}
+                      onChange={(e) => setNewProjectName(e.target.value)}
+                      placeholder="例如：王小明家庭、2024個案A..."
+                      className="flex-1 px-4 py-2.5 bg-white border border-zinc-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                      onKeyDown={(e) => e.key === 'Enter' && createNewProject(newProjectName)}
+                    />
+                    <button 
+                      onClick={() => createNewProject(newProjectName)}
+                      className="px-5 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-bold shadow-lg shadow-indigo-100 hover:bg-indigo-700 transition-all flex items-center gap-2"
+                    >
+                      <Plus className="w-4 h-4" />
+                      建立
+                    </button>
+                  </div>
+                </div>
+
+                {/* Project List */}
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between px-1">
+                    <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">已儲存的家庭 ({projects.length})</label>
+                    {projects.length > 0 && <span className="text-[10px] text-zinc-400">點擊切換項目</span>}
+                  </div>
+                  
+                  <div className="grid gap-3 pb-4">
+                    {projects.length === 0 ? (
+                      <div className="py-12 text-center border-2 border-dashed border-zinc-100 rounded-3xl bg-zinc-50/30">
+                        <FolderOpen className="w-12 h-12 text-zinc-200 mx-auto mb-3" />
+                        <p className="text-sm text-zinc-400 font-medium">目前還沒有儲存的家庭</p>
+                        <p className="text-[10px] text-zinc-300 mt-1">上面輸入名稱來建立新的家系圖</p>
+                      </div>
+                    ) : (
+                      [...projects].sort((a, b) => b.updatedAt - a.updatedAt).map(project => (
+                        <div 
+                          key={project.id}
+                          className={`group flex items-center gap-4 p-4 rounded-2xl border transition-all relative ${
+                            activeProjectId === project.id 
+                              ? 'bg-indigo-50 border-indigo-200 ring-1 ring-indigo-200 shadow-sm' 
+                              : 'bg-white border-zinc-100 hover:border-zinc-300 hover:shadow-md'
+                          }`}
+                        >
+                          <div 
+                            className="flex flex-1 items-center gap-4 cursor-pointer min-w-0"
+                            onClick={() => loadProject(project.id)}
+                          >
+                            <div className={`p-3 rounded-xl transition-colors ${activeProjectId === project.id ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-200/50' : 'bg-white border border-zinc-100 text-zinc-300 group-hover:text-indigo-400 group-hover:border-indigo-100'}`}>
+                              <FolderOpen className="w-5 h-5" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <h4 className={`font-bold truncate flex items-center gap-2 ${activeProjectId === project.id ? 'text-indigo-900' : 'text-zinc-900'}`}>
+                                {project.name}
+                                {activeProjectId === project.id && <span className="bg-indigo-600 text-white text-[8px] px-1.5 py-0.5 rounded font-black tracking-tighter">正在編輯</span>}
+                              </h4>
+                              <p className="text-[10px] text-zinc-400 mt-1 flex items-center gap-1 font-medium">
+                                <RotateCcw className="w-3 h-3" />
+                                更新於: {new Date(project.updatedAt).toLocaleString()}
+                              </p>
+                            </div>
+                          </div>
+                          
+                          <div className="flex gap-1.5 items-center">
+                            <button 
+                              type="button"
+                              onClick={() => {
+                                const newName = window.prompt('重新命名家庭', project.name);
+                                if (newName) renameProject(project.id, newName);
+                              }}
+                              className="p-2 text-zinc-400 hover:text-indigo-600 hover:bg-white border border-transparent hover:border-indigo-100 rounded-xl transition-all shadow-none hover:shadow-sm"
+                              title="重新命名"
+                            >
+                              <Edit3 className="w-4 h-4" />
+                            </button>
+                            <button 
+                              type="button"
+                              onClick={() => setProjectToDelete(project.id)}
+                              className="p-2 text-zinc-400 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-100 rounded-xl transition-all shadow-none hover:shadow-sm"
+                              title="刪除"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Delete Confirmation Overlay */}
+      <AnimatePresence>
+        {projectToDelete && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+              onClick={() => setProjectToDelete(null)}
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative bg-white p-8 rounded-3xl shadow-2xl max-w-sm w-full text-center border border-zinc-100"
+            >
+              <div className="w-16 h-16 bg-rose-50 text-rose-500 rounded-2xl flex items-center justify-center mx-auto mb-6">
+                <Trash2 className="w-8 h-8" />
+              </div>
+              <h3 className="text-xl font-bold text-zinc-900">永久刪除家庭？</h3>
+              <p className="text-sm text-zinc-500 mt-2 leading-relaxed">
+                確定要刪除「<span className="font-bold text-zinc-700">{projects.find(p => p.id === projectToDelete)?.name}</span>」嗎？<br />此動作將無法復原。
+              </p>
+              <div className="grid grid-cols-2 gap-3 mt-8">
+                 <button 
+                  onClick={() => setProjectToDelete(null)} 
+                  className="py-3 bg-zinc-100 text-zinc-600 rounded-2xl text-sm font-bold hover:bg-zinc-200 transition-colors"
+                >
+                  取消
+                </button>
+                 <button 
+                  onClick={() => deleteProject(projectToDelete)} 
+                  className="py-3 bg-rose-600 text-white rounded-2xl text-sm font-bold hover:bg-rose-700 transition-shadow shadow-lg shadow-rose-100"
+                >
+                  確定刪除
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+    </>
   );
 }
