@@ -201,6 +201,14 @@ export default function App() {
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [lastSavedPulse, setLastSavedPulse] = useState(false);
 
+  // States for Inline Renaming & Saving to avoid window.prompt iframe restrictions
+  const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
+  const [editingProjectName, setEditingProjectName] = useState<string>('');
+  const [isEditingContextName, setIsEditingContextName] = useState<boolean>(false);
+  const [contextNameInputValue, setContextNameInputValue] = useState<string>('');
+  const [isSavingDraftAsProject, setIsSavingDraftAsProject] = useState<boolean>(false);
+  const [draftProjectNameInput, setDraftProjectNameInput] = useState<string>('從草稿儲存的家庭');
+
   // Manual save function
   const saveChanges = () => {
     if (activeProjectId && activeProjectId !== 'draft') {
@@ -854,14 +862,68 @@ export default function App() {
   const exportImage = () => {
     if (stageRef.current) {
       const stage = stageRef.current;
-      const layer = stage.getLayers()[0];
+      const layers = stage.getLayers();
+      const primaryLayer = layers[0];
       
-      // Get the bounding box of all content in the layer (screen space)
-      const box = layer.getClientRect();
-      
-      // Get the bounding box relative to the layer (local space)
-      const layerBox = layer.getClientRect({ relativeTo: layer });
-      
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+
+      let layerMinX = Infinity;
+      let layerMinY = Infinity;
+      let layerMaxX = -Infinity;
+      let layerMaxY = -Infinity;
+
+      layers.forEach((lyr) => {
+        if (lyr.getChildren().length > 0) {
+          try {
+            const b = lyr.getClientRect();
+            if (b.width > 0 && b.height > 0) {
+              minX = Math.min(minX, b.x);
+              minY = Math.min(minY, b.y);
+              maxX = Math.max(maxX, b.x + b.width);
+              maxY = Math.max(maxY, b.y + b.height);
+            }
+
+            const lb = lyr.getClientRect({ relativeTo: primaryLayer });
+            if (lb.width > 0 && lb.height > 0) {
+              layerMinX = Math.min(layerMinX, lb.x);
+              layerMinY = Math.min(layerMinY, lb.y);
+              layerMaxX = Math.max(layerMaxX, lb.x + lb.width);
+              layerMaxY = Math.max(layerMaxY, lb.y + lb.height);
+            }
+          } catch (e) {
+            console.warn("Failed to get client rect for layer:", e);
+          }
+        }
+      });
+
+      let box = { x: 0, y: 0, width: 0, height: 0 };
+      let layerBox = { x: 0, y: 0, width: 0, height: 0 };
+
+      if (minX !== Infinity && minY !== Infinity && maxX !== -Infinity && maxY !== -Infinity) {
+        box = {
+          x: minX,
+          y: minY,
+          width: maxX - minX,
+          height: maxY - minY
+        };
+      } else {
+        box = primaryLayer.getClientRect();
+      }
+
+      if (layerMinX !== Infinity && layerMinY !== Infinity && layerMaxX !== -Infinity && layerMaxY !== -Infinity) {
+        layerBox = {
+          x: layerMinX,
+          y: layerMinY,
+          width: layerMaxX - layerMinX,
+          height: layerMaxY - layerMinY
+        };
+      } else {
+        layerBox = primaryLayer.getClientRect({ relativeTo: primaryLayer });
+      }
+
       let bg: any = null;
       if (exportWithBackground) {
         bg = new Konva.Rect({
@@ -872,7 +934,7 @@ export default function App() {
           fill: 'white',
           listening: false,
         });
-        layer.add(bg);
+        primaryLayer.add(bg);
         bg.moveToBottom();
       }
 
@@ -989,32 +1051,83 @@ export default function App() {
             <div className={`p-1 rounded ${activeProjectId ? 'bg-indigo-100 text-indigo-600' : 'bg-zinc-200 text-zinc-500'}`}>
               {activeProjectId ? <FolderOpen className="w-3 h-3" /> : <Pencil className="w-3 h-3" />}
             </div>
-            <span className={`text-[11px] font-bold truncate ${activeProjectId ? 'text-indigo-900' : 'text-zinc-600'}`}>
-              {activeProjectId ? (projects.find(p => p.id === activeProjectId)?.name || '未命名家庭') : '正在使用草稿'}
-            </span>
+            {isEditingContextName ? (
+              <div className="flex items-center gap-1 flex-1">
+                <input 
+                  type="text"
+                  value={contextNameInputValue}
+                  onChange={(e) => setContextNameInputValue(e.target.value)}
+                  className="px-2 py-0.5 max-w-[140px] bg-white border border-indigo-200 rounded text-[11px] focus:ring-1 focus:ring-indigo-500 outline-none font-bold text-zinc-900"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      const trimmed = contextNameInputValue.trim();
+                      if (trimmed && activeProjectId) {
+                        renameProject(activeProjectId, trimmed);
+                        setIsEditingContextName(false);
+                      }
+                    } else if (e.key === 'Escape') {
+                      setIsEditingContextName(false);
+                    }
+                  }}
+                  autoFocus
+                />
+                <button 
+                  onClick={() => {
+                    const trimmed = contextNameInputValue.trim();
+                    if (trimmed && activeProjectId) {
+                      renameProject(activeProjectId, trimmed);
+                      setIsEditingContextName(false);
+                    }
+                  }}
+                  className="p-0.5 text-emerald-600 hover:bg-emerald-50 rounded"
+                >
+                  <Check className="w-3 h-3" />
+                </button>
+                <button 
+                  onClick={() => setIsEditingContextName(false)}
+                  className="p-0.5 text-zinc-400 hover:bg-zinc-100 rounded"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </div>
+            ) : (
+              <span className={`text-[11px] font-bold truncate ${activeProjectId ? 'text-indigo-900' : 'text-zinc-600'}`}>
+                {activeProjectId ? (projects.find(p => p.id === activeProjectId)?.name || '未命名家庭') : '正在使用草稿'}
+              </span>
+            )}
           </div>
           
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-1 shrink-0">
             {!activeProjectId ? (
               <button 
-                onClick={saveCurrentToNewProject}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setDraftProjectNameInput('從草稿儲存的家庭');
+                  setIsSavingDraftAsProject(true);
+                  setIsProjectModalOpen(true);
+                }}
                 className="text-indigo-600 hover:text-indigo-700 text-[10px] font-bold flex items-center gap-1 bg-white border border-indigo-100 px-2 py-1 rounded shadow-sm hover:shadow"
+                title="儲存草稿為正式家系圖"
               >
                 <Save className="w-2.5 h-2.5" />
                 儲存
               </button>
             ) : (
-              <button 
-                 onClick={() => {
-                   const currentProject = projects.find(p => p.id === activeProjectId);
-                   const newName = prompt('重新命名家庭', currentProject?.name);
-                   if (newName && activeProjectId) renameProject(activeProjectId, newName);
-                 }}
-                 className="p-1 text-zinc-400 hover:text-indigo-600 hover:bg-white rounded transition-all"
-                 title="重新命名"
-              >
-                <Edit3 className="w-3 h-3" />
-              </button>
+              !isEditingContextName && (
+                <button 
+                   onClick={() => {
+                     const currentProject = projects.find(p => p.id === activeProjectId);
+                     if (currentProject) {
+                       setContextNameInputValue(currentProject.name);
+                       setIsEditingContextName(true);
+                     }
+                   }}
+                   className="p-1 text-zinc-400 hover:text-indigo-600 hover:bg-white rounded transition-all"
+                   title="重新命名"
+                >
+                  <Edit3 className="w-3 h-3" />
+                </button>
+              )
             )}
           </div>
         </div>
@@ -1412,27 +1525,38 @@ export default function App() {
 
           {/* Action Toolbar - Right */}
           <div className="absolute top-6 right-6 z-10 flex flex-col items-end gap-2">
-             <button 
-              onClick={saveChanges}
-              className={`flex items-center gap-2 px-5 py-2.5 rounded-xl font-bold text-sm transition-all shadow-lg border ${
-                hasUnsavedChanges 
-                ? 'bg-indigo-600 text-white border-indigo-500 shadow-indigo-100 hover:bg-indigo-700' 
-                : 'bg-white text-emerald-600 border-zinc-200 shadow-sm'
-              }`}
-            >
-              {lastSavedPulse ? (
-                <>
-                  <Check className="w-4 h-4" />
-                  已儲存
-                </>
-              ) : (
-                <>
-                  <Save className={`w-4 h-4 ${hasUnsavedChanges ? 'animate-pulse' : ''}`} />
-                  {hasUnsavedChanges ? '儲存當前變更' : '資料已儲存'}
-                </>
-              )}
-            </button>
-            {hasUnsavedChanges && (
+            {!activeProjectId ? (
+              <button 
+                onClick={saveChanges}
+                className="flex items-center gap-1.5 px-3.5 py-2.5 bg-white text-zinc-600 rounded-xl font-bold text-xs border border-zinc-200 hover:bg-zinc-50 hover:text-zinc-800 transition-all shadow-lg"
+                title="手動將此草稿儲存至本機暫存"
+              >
+                <Pencil className="w-3.5 h-3.5 text-zinc-400" />
+                {lastSavedPulse ? "草稿已存" : "儲存草稿"}
+              </button>
+            ) : (
+              <button 
+                onClick={saveChanges}
+                className={`flex items-center gap-2 px-5 py-2.5 rounded-xl font-bold text-sm transition-all shadow-lg border ${
+                  hasUnsavedChanges 
+                  ? 'bg-indigo-600 text-white border-indigo-500 shadow-indigo-100 hover:bg-indigo-700' 
+                  : 'bg-white text-emerald-600 border-zinc-200 shadow-sm'
+                }`}
+              >
+                {lastSavedPulse ? (
+                  <>
+                    <Check className="w-4 h-4" />
+                    已儲存
+                  </>
+                ) : (
+                  <>
+                    <Save className={`w-4 h-4 ${hasUnsavedChanges ? 'animate-pulse' : ''}`} />
+                    {hasUnsavedChanges ? '儲存當前變更' : '資料已儲存'}
+                  </>
+                )}
+              </button>
+            )}
+            {hasUnsavedChanges && activeProjectId && (
               <motion.div 
                 initial={{ opacity: 0, x: 20 }}
                 animate={{ opacity: 1, x: 0 }}
@@ -1933,28 +2057,120 @@ export default function App() {
               </div>
 
               <div className="p-6 overflow-y-auto flex-1 space-y-8">
-                {/* Draft Option */}
-                <div 
-                  onClick={switchToDraft}
-                  className={`group flex items-center gap-4 p-4 rounded-2xl border transition-all cursor-pointer ${
-                    !activeProjectId 
-                      ? 'bg-amber-50 border-amber-200 ring-1 ring-amber-200 shadow-sm' 
-                      : 'bg-zinc-50 border-zinc-200 hover:border-zinc-300'
-                  }`}
-                >
-                  <div className={`p-3 rounded-xl transition-colors ${!activeProjectId ? 'bg-amber-500 text-white shadow-md shadow-amber-100' : 'bg-white text-zinc-400'}`}>
-                    <Pencil className="w-5 h-5" />
-                  </div>
-                  <div className="flex-1">
-                    <h4 className="font-bold text-zinc-900">隨意繪製 (我的草案)</h4>
-                    <p className="text-xs text-zinc-500 mt-0.5">適合臨時繪製，不會儲存為正式家庭</p>
-                  </div>
-                  {!activeProjectId && (
-                    <div className="text-amber-600 pr-1">
-                      <Check className="w-5 h-5" />
+                 {/* Draft Option */}
+                  {isSavingDraftAsProject ? (
+                    <div 
+                      onClick={(e) => e.stopPropagation()}
+                      className="p-4 rounded-2xl border bg-amber-50/50 border-amber-200 ring-1 ring-amber-200/30 shadow-inner space-y-3 cursor-default"
+                    >
+                      <div className="flex items-center gap-2">
+                        <Save className="w-4 h-4 text-indigo-600 animate-pulse-subtle" />
+                        <span className="text-sm font-bold text-zinc-700">儲存草稿為正式家庭</span>
+                      </div>
+                      <div className="flex gap-2">
+                        <input 
+                          type="text" 
+                          value={draftProjectNameInput}
+                          onChange={(e) => setDraftProjectNameInput(e.target.value)}
+                          placeholder="請輸入家庭名稱，例如：王聰明家庭"
+                          className="flex-1 px-4 py-2 bg-white border border-zinc-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none transition-all text-zinc-900 font-bold"
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              const trimmed = draftProjectNameInput.trim();
+                              if (!trimmed) return;
+                              const newProject = {
+                                id: 'project-' + Date.now(),
+                                name: trimmed,
+                                data: { members, unions, children, lines },
+                                createdAt: Date.now(),
+                                updatedAt: Date.now()
+                              };
+                              const updatedProjects = [...projects, newProject];
+                              setProjects(updatedProjects);
+                              setActiveProjectId(newProject.id);
+                              localStorage.setItem('genogram-projects', JSON.stringify(updatedProjects));
+                              localStorage.setItem('genogram-active-project-id', newProject.id);
+                              setIsProjectModalOpen(false);
+                              setIsSavingDraftAsProject(false);
+                              alert('已成功將草稿存入家庭管理中心並切換！');
+                            } else if (e.key === 'Escape') {
+                              setIsSavingDraftAsProject(false);
+                            }
+                          }}
+                          autoFocus
+                        />
+                        <button 
+                          onClick={() => {
+                            const trimmed = draftProjectNameInput.trim();
+                            if (!trimmed) return;
+                            const newProject = {
+                              id: 'project-' + Date.now(),
+                              name: trimmed,
+                              data: { members, unions, children, lines },
+                              createdAt: Date.now(),
+                              updatedAt: Date.now()
+                            };
+                            const updatedProjects = [...projects, newProject];
+                            setProjects(updatedProjects);
+                            setActiveProjectId(newProject.id);
+                            localStorage.setItem('genogram-projects', JSON.stringify(updatedProjects));
+                            localStorage.setItem('genogram-active-project-id', newProject.id);
+                            setIsProjectModalOpen(false);
+                            setIsSavingDraftAsProject(false);
+                            alert('已成功將草稿存入家庭管理中心並切換！');
+                          }}
+                          className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-sm font-bold transition-all shadow-md shadow-indigo-100 shrink-0"
+                        >
+                          儲存
+                        </button>
+                        <button 
+                          onClick={() => setIsSavingDraftAsProject(false)}
+                          className="px-3 py-2 bg-white border border-zinc-200 hover:bg-zinc-50 text-zinc-500 rounded-xl text-sm font-bold transition-all shadow-sm shrink-0"
+                        >
+                          取消
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div 
+                      onClick={switchToDraft}
+                      className={`group flex items-center justify-between p-4 rounded-2xl border transition-all cursor-pointer ${
+                        !activeProjectId 
+                          ? 'bg-amber-50 border-amber-200 ring-1 ring-amber-200 shadow-sm' 
+                          : 'bg-zinc-50 border-zinc-200 hover:border-zinc-300'
+                      }`}
+                    >
+                      <div className="flex items-center gap-4 flex-1 min-w-0">
+                        <div className={`p-3 rounded-xl transition-colors ${!activeProjectId ? 'bg-amber-500 text-white shadow-md shadow-amber-100' : 'bg-white text-zinc-400'}`}>
+                          <Pencil className="w-5 h-5" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <h4 className="font-bold text-zinc-900 truncate font-sans">隨意繪製 (我的草案)</h4>
+                          <p className="text-xs text-zinc-500 mt-0.5 truncate">適合臨時繪製，不會儲存為正式家庭</p>
+                        </div>
+                      </div>
+                      
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setDraftProjectNameInput('從草稿儲存的家庭');
+                            setIsSavingDraftAsProject(true);
+                          }}
+                          className="px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 border border-indigo-100 rounded-xl text-xs font-bold transition-all flex items-center gap-1 shadow-sm"
+                          title="將此隨手記草稿儲存至案家中心"
+                        >
+                          <Save className="w-3.5 h-3.5 animate-pulse-subtle" />
+                          儲存至案家
+                        </button>
+                        {!activeProjectId && (
+                          <div className="text-amber-600 px-1">
+                            <Check className="w-5 h-5" />
+                          </div>
+                        )}
+                      </div>
                     </div>
                   )}
-                </div>
 
                 {/* New Project Input */}
                 <div className="space-y-3 bg-zinc-50 p-4 rounded-2xl border border-zinc-100">
@@ -2002,46 +2218,103 @@ export default function App() {
                               : 'bg-white border-zinc-100 hover:border-zinc-300 hover:shadow-md'
                           }`}
                         >
-                          <div 
-                            className="flex flex-1 items-center gap-4 cursor-pointer min-w-0"
-                            onClick={() => loadProject(project.id)}
-                          >
-                            <div className={`p-3 rounded-xl transition-colors ${activeProjectId === project.id ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-200/50' : 'bg-white border border-zinc-100 text-zinc-300 group-hover:text-indigo-400 group-hover:border-indigo-100'}`}>
-                              <FolderOpen className="w-5 h-5" />
-                            </div>
-                            <div className="flex-1 min-w-0">
-                              <h4 className={`font-bold truncate flex items-center gap-2 ${activeProjectId === project.id ? 'text-indigo-900' : 'text-zinc-900'}`}>
-                                {project.name}
-                                {activeProjectId === project.id && <span className="bg-indigo-600 text-white text-[8px] px-1.5 py-0.5 rounded font-black tracking-tighter">正在編輯</span>}
-                              </h4>
-                              <p className="text-[10px] text-zinc-400 mt-1 flex items-center gap-1 font-medium">
-                                <RotateCcw className="w-3 h-3" />
-                                更新於: {new Date(project.updatedAt).toLocaleString()}
-                              </p>
-                            </div>
-                          </div>
-                          
-                          <div className="flex gap-1.5 items-center">
-                            <button 
-                              type="button"
-                              onClick={() => {
-                                const newName = window.prompt('重新命名家庭', project.name);
-                                if (newName) renameProject(project.id, newName);
-                              }}
-                              className="p-2 text-zinc-400 hover:text-indigo-600 hover:bg-white border border-transparent hover:border-indigo-100 rounded-xl transition-all shadow-none hover:shadow-sm"
-                              title="重新命名"
+                          {editingProjectId === project.id ? (
+                            <div 
+                              className="flex flex-1 items-center gap-3 min-w-0"
+                              onClick={(e) => e.stopPropagation()}
                             >
-                              <Edit3 className="w-4 h-4" />
-                            </button>
-                            <button 
-                              type="button"
-                              onClick={() => setProjectToDelete(project.id)}
-                              className="p-2 text-zinc-400 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-100 rounded-xl transition-all shadow-none hover:shadow-sm"
-                              title="刪除"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          </div>
+                              <div className="p-3 bg-indigo-50 border border-indigo-100 text-indigo-600 rounded-xl shrink-0">
+                                <FolderOpen className="w-5 h-5" />
+                              </div>
+                              <div className="flex-1 min-w-0 flex gap-1.5 items-center">
+                                <input 
+                                  type="text"
+                                  value={editingProjectName}
+                                  onChange={(e) => setEditingProjectName(e.target.value)}
+                                  className="flex-1 min-w-0 px-3 py-1.5 bg-white border border-indigo-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none transition-all font-bold text-zinc-900"
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') {
+                                      const trimmed = editingProjectName.trim();
+                                      if (trimmed) {
+                                        renameProject(project.id, trimmed);
+                                        setEditingProjectId(null);
+                                      }
+                                    } else if (e.key === 'Escape') {
+                                      setEditingProjectId(null);
+                                    }
+                                  }}
+                                  autoFocus
+                                />
+                                <button 
+                                  onClick={() => {
+                                    const trimmed = editingProjectName.trim();
+                                    if (trimmed) {
+                                      renameProject(project.id, trimmed);
+                                      setEditingProjectId(null);
+                                    }
+                                  }}
+                                  className="p-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-600 border border-emerald-100 rounded-xl transition-all shrink-0"
+                                  title="確認修改"
+                                >
+                                  <Check className="w-4 h-4" />
+                                </button>
+                                <button 
+                                  onClick={() => setEditingProjectId(null)}
+                                  className="p-2 bg-zinc-50 hover:bg-zinc-100 text-zinc-400 border border-zinc-200 rounded-xl transition-all shrink-0"
+                                  title="取消"
+                                >
+                                  <X className="w-4 h-4" />
+                                </button>
+                              </div>
+                            </div>
+                          ) : (
+                            <>
+                              <div 
+                                className="flex flex-1 items-center gap-4 cursor-pointer min-w-0"
+                                onClick={() => loadProject(project.id)}
+                              >
+                                <div className={`p-3 rounded-xl transition-colors ${activeProjectId === project.id ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-200/50' : 'bg-white border border-zinc-100 text-zinc-300 group-hover:text-indigo-400 group-hover:border-indigo-100'}`}>
+                                  <FolderOpen className="w-5 h-5" />
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                  <h4 className={`font-bold truncate flex items-center gap-2 ${activeProjectId === project.id ? 'text-indigo-900' : 'text-zinc-900'}`}>
+                                    {project.name}
+                                    {activeProjectId === project.id && <span className="bg-indigo-600 text-white text-[8px] px-1.5 py-0.5 rounded font-black tracking-tighter">正在編輯</span>}
+                                  </h4>
+                                  <p className="text-[10px] text-zinc-400 mt-1 flex items-center gap-1 font-medium">
+                                    <RotateCcw className="w-3 h-3" />
+                                    更新於: {new Date(project.updatedAt).toLocaleString()}
+                                  </p>
+                                </div>
+                              </div>
+                              
+                              <div className="flex gap-1.5 items-center shrink-0">
+                                <button 
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setEditingProjectId(project.id);
+                                    setEditingProjectName(project.name);
+                                  }}
+                                  className="p-2 text-zinc-400 hover:text-indigo-600 hover:bg-white border border-transparent hover:border-indigo-100 rounded-xl transition-all shadow-none hover:shadow-sm"
+                                  title="重新命名"
+                                >
+                                  <Edit3 className="w-4 h-4" />
+                                </button>
+                                <button 
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setProjectToDelete(project.id);
+                                  }}
+                                  className="p-2 text-zinc-400 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-100 rounded-xl transition-all shadow-none hover:shadow-sm"
+                                  title="刪除"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </div>
+                            </>
+                          )}
                         </div>
                       ))
                     )}
