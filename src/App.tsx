@@ -1,2100 +1,2164 @@
-import React, { useState, useEffect, useRef } from 'react';
-import Konva from 'konva';
-import { Stage, Layer, Rect, Circle, Line, Text, Group, RegularPolygon } from 'react-konva';
-import { Member, Union, Child, UnionType, Gender, Project } from './types';
-import { User, UserPlus, Trash2, Heart, Baby, Settings2, Download, Plus, Users, XCircle, Split, Link2, Undo2, RotateCcw, ZoomIn, ZoomOut, Maximize, Check, X, Pencil, MousePointer2, Eraser, FolderOpen, Save, FilePlus, Edit3, ScanLine, Loader2 } from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
-import { recognizeGenogramFromImage } from './services/aiService';
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
-const MEMBER_SIZE = 60;
-const GRID_SIZE = 20;
+import { useState, useEffect, useRef } from 'react';
+import { 
+  Keyboard as KeyboardIcon, 
+  RotateCcw, 
+  Volume2, 
+  VolumeX, 
+  Timer, 
+  Sparkles, 
+  BookOpen, 
+  Award, 
+  Activity, 
+  Check, 
+  HelpCircle, 
+  Send, 
+  FileText, 
+  X, 
+  Info, 
+  Settings, 
+  AlertCircle 
+} from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
+import { 
+  KEY_TO_BOPOMOFO, 
+  BOPOMOFO_TO_KEY,
+  parseBopomofoParts 
+} from './data/defaultVocab';
+import { convertTextToVocabularyOffline } from './data/chineseToBopomofo';
+import { audioSynth } from './utils/audio';
+import { VocabularyItem, TextbookVersion, GameStats } from './types';
 
 export default function App() {
-  const [members, setMembers] = useState<Member[]>([]);
-  const [unions, setUnions] = useState<Union[]>([]);
-  const [children, setChildren] = useState<Child[]>([]);
-  const [history, setHistory] = useState<{members: Member[], unions: Union[], children: Child[], lines: any[]}[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [selectedUnionId, setSelectedUnionId] = useState<string | null>(null);
-  const [customBirthCount, setCustomBirthCount] = useState<number>(3);
-  const [dimensions, setDimensions] = useState({ width: window.innerWidth, height: window.innerHeight });
-  const [scale, setScale] = useState(1);
-  const [position, setPosition] = useState({ x: 0, y: 0 });
-  const [exportWithBackground, setExportWithBackground] = useState(true);
-  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
-  const [projectToDelete, setProjectToDelete] = useState<string | null>(null);
-  const [draftData, setDraftData] = useState<{members: Member[], unions: Union[], children: Child[], lines: any[]} | null>(null);
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [isProjectModalOpen, setIsProjectModalOpen] = useState(false);
-  const [isAiParsing, setIsAiParsing] = useState(false);
-  const [newProjectName, setNewProjectName] = useState('');
-  const [lines, setLines] = useState<any[]>([]);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const stageRef = useRef<any>(null);
+  // Navigation / Mode Select states
+  const [textbook, setTextbook] = useState<TextbookVersion>('自訂題目');
+  const [questionCountLimit, setQuestionCountLimit] = useState<number>(10);
+  
+  // Custom topic and text inputs
+  const [customText, setCustomText] = useState<string>('清晨，高大的山林蒙上一層白雲。小松鼠穿梭在樹枝間，尋找著松果。');
+  const [aiTopic, setAiTopic] = useState<string>('海洋探險');
+  
+  // Game Play states
+  const [gameMode, setGameMode] = useState<'setup' | 'play' | 'result'>('setup');
+  const [playModeType, setPlayModeType] = useState<'normal' | 'timeAttack'>('normal');
+  const [timeLimit, setTimeLimit] = useState<number>(180); // in seconds, default 3 minutes (180s)
+  const [timeRemaining, setTimeRemaining] = useState<number>(180);
+  const [timerActive, setTimerActive] = useState<boolean>(false);
+  const [infiniteTime, setInfiniteTime] = useState<boolean>(false);
+  
+  // Words to practice
+  const [selectedWords, setSelectedWords] = useState<VocabularyItem[]>([]);
+  const [currentWordIndex, setCurrentWordIndex] = useState<number>(0);
+  const [currentCharacterIndex, setCurrentCharacterIndex] = useState<number>(0);
+  const [typedWordSymbols, setTypedWordSymbols] = useState<string[][]>([]);
+  const [wrongAnswer, setWrongAnswer] = useState<boolean>(false);
+  const [wrongCharIndices, setWrongCharIndices] = useState<number[]>([]);
+  const [completedWordItems, setCompletedWordItems] = useState<VocabularyItem[]>([]);
+  
+  // PK Battle State Management
+  const [pkRole, setPkRole] = useState<'host' | 'join'>('host');
+  const [pkRoomCode, setPkRoomCode] = useState<string>('');
+  const [pkUsername, setPkUsername] = useState<string>('');
+  const [pkQuestionSource, setPkQuestionSource] = useState<'custom' | 'ai'>('custom');
+  const [pkCustomText, setPkCustomText] = useState<string>('極速拼音大對決！看誰打得最快最準確！');
+  const [pkAiTopic, setPkAiTopic] = useState<string>('太空探險');
+  const [pkRoomState, setPkRoomState] = useState<any>(null);
+  const [pkLobbyError, setPkLobbyError] = useState<string>('');
+  const [pkCountdown, setPkCountdown] = useState<number>(-1);
+  const [pkLoading, setPkLoading] = useState<boolean>(false);
+  const [isPkPolling, setIsPkPolling] = useState<boolean>(false);
 
-  // Initialize
-  useEffect(() => {
-    const savedProjects = localStorage.getItem('genogram-projects');
-    const lastActiveId = localStorage.getItem('genogram-active-project-id');
-    const savedDraft = localStorage.getItem('genogram-draft');
+  // Statistics
+  const [stats, setStats] = useState<GameStats>({
+    correctCount: 0,
+    incorrectCount: 0,
+    completedCount: 0,
+    startTime: null,
+    totalTimeSpent: 0,
+    multiplier: 1,
+    score: 0
+  });
+
+  // User Help / Interface Controls
+  const [showHint, setShowHint] = useState<boolean>(false);
+  const [highlightHelper, setHighlightHelper] = useState<boolean>(false);
+  const [soundEnabled, setSoundEnabled] = useState<boolean>(true);
+  const [physicalKeyPress, setPhysicalKeyPress] = useState<string | null>(null);
+  const [wrongKeyFlash, setWrongKeyFlash] = useState<boolean>(false);
+  const [loading, setLoading] = useState<boolean>(false);
+  const [apiError, setApiError] = useState<string | null>(null);
+
+  // References
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Normalization for robust Bopomofo syllable comparison across all platform sources
+  const normalizeBopomofo = (bopomofoStr: string): string => {
+    if (!bopomofoStr) return '';
+    let clean = bopomofoStr.trim();
     
-    let loadedProjects: Project[] = [];
-    if (savedProjects) {
-      try {
-        loadedProjects = JSON.parse(savedProjects);
-        setProjects(loadedProjects);
-      } catch (e) {
-        console.error('Failed to load projects', e);
-      }
-    }
-
-    if (savedDraft) {
-      try {
-        setDraftData(JSON.parse(savedDraft));
-      } catch (e) {}
-    }
+    // Replace various lookalike second tones
+    clean = clean.replace(/[\u00b4\u02ca´′ˊ]/g, 'ˊ');
     
-    if (lastActiveId === 'draft' || !lastActiveId) {
-      switchToDraft();
-    } else {
-      const activeProject = loadedProjects.find(p => p.id === lastActiveId);
-      if (activeProject) {
-        loadProjectData(activeProject);
-      } else {
-        switchToDraft();
-      }
-    }
-  }, []);
-
-  const switchToDraft = () => {
-    const savedDraft = localStorage.getItem('genogram-draft');
-    if (savedDraft) {
-      try {
-        const data = JSON.parse(savedDraft);
-        setMembers(data.members || []);
-        setUnions(data.unions || []);
-        setChildren(data.children || []);
-        setLines(data.lines || []);
-      } catch (e) {
-        initDraft();
-      }
-    } else {
-      initDraft();
-    }
-    setActiveProjectId(null);
-    localStorage.setItem('genogram-active-project-id', 'draft');
-    setHistory([]);
-    setSelectedId(null);
-    setSelectedUnionId(null);
-  };
-
-  const initDraft = () => {
-    setMembers([{
-      id: 'index-member',
-      name: '',
-      gender: 'male',
-      x: window.innerWidth / 2,
-      y: window.innerHeight / 2,
-      isIndex: true,
-    }]);
-    setUnions([]);
-    setChildren([]);
-    setLines([]);
-  };
-
-  const loadProjectData = (project: Project) => {
-    setActiveProjectId(project.id);
-    setMembers(project.data.members);
-    setUnions(project.data.unions);
-    setChildren(project.data.children);
-    setLines(project.data.lines || []);
-    setHistory([]);
-    localStorage.setItem('genogram-active-project-id', project.id);
-  };
-
-  const loadProject = (id: string) => {
-    const project = projects.find(p => p.id === id);
-    if (!project) return;
-    loadProjectData(project);
-    setIsProjectModalOpen(false);
-  };
-
-  const createNewProject = (name: string) => {
-    const defaultData = {
-      members: [{
-        id: 'index-member',
-        name: '',
-        gender: 'male' as Gender,
-        x: window.innerWidth / 2,
-        y: window.innerHeight / 2,
-        isIndex: true,
-      }],
-      unions: [],
-      children: [],
-      lines: []
-    };
+    // Replace various lookalike third tones
+    clean = clean.replace(/[\u02c7\u02ecˇ]/g, 'ˇ');
     
-    const newProject: Project = {
-      id: 'project-' + Date.now(),
-      name: name || '未命名家庭',
-      data: defaultData,
-      createdAt: Date.now(),
-      updatedAt: Date.now()
-    };
+    // Replace various lookalike fourth tones
+    clean = clean.replace(/[\u0060\u02cb`ˋ]/g, 'ˋ');
     
-    const updatedProjects = [...projects, newProject];
-    setProjects(updatedProjects);
-    loadProjectData(newProject);
+    // Replace various lookalike light tones
+    clean = clean.replace(/[\u02d9\u00b7·•\u0307˙]/g, '˙');
     
-    localStorage.setItem('genogram-projects', JSON.stringify(updatedProjects));
-    setIsProjectModalOpen(false);
-    setNewProjectName('');
-  };
-
-  const deleteProject = (id: string) => {
-    setProjects(prev => {
-      const updated = prev.filter(p => p.id !== id);
-      localStorage.setItem('genogram-projects', JSON.stringify(updated));
-      return updated;
-    });
+    // Replace various lookalike first tones or spaces
+    clean = clean.replace(/[\u02c9ˉ]/g, 'ˉ');
     
-    if (activeProjectId === id) {
-      switchToDraft();
-    }
-    setProjectToDelete(null);
+    // Remove any English alphabets or punctuation symbols but keep standard symbols
+    clean = clean.replace(/[^ㄅㄆㄇㄈㄉㄊㄋㄌㄍㄎㄏㄐㄑㄒㄓㄔㄕㄖㄗㄘㄙㄧㄨㄩㄚㄛㄜㄝㄞㄟㄠㄡㄢㄣㄤㄥㄦˊˇˋ˙ˉ]/g, '');
+
+    return clean;
   };
 
-  const renameProject = (id: string, newName: string) => {
-    if (!newName || !newName.trim()) return;
-    const updatedProjects = projects.map(p => 
-      p.id === id ? { ...p, name: newName, updatedAt: Date.now() } : p
-    );
-    setProjects(updatedProjects);
-    localStorage.setItem('genogram-projects', JSON.stringify(updatedProjects));
-  };
-
-  const saveCurrentToNewProject = () => {
-    const name = prompt('輸入新家庭名稱', '從草稿儲存的家庭');
-    if (!name) return;
-
-    const newProject: Project = {
-      id: 'project-' + Date.now(),
-      name: name,
-      data: { members, unions, children, lines },
-      createdAt: Date.now(),
-      updatedAt: Date.now()
-    };
-
-    const updatedProjects = [...projects, newProject];
-    setProjects(updatedProjects);
-    setActiveProjectId(newProject.id);
-    localStorage.setItem('genogram-projects', JSON.stringify(updatedProjects));
-    localStorage.setItem('genogram-active-project-id', newProject.id);
-    alert('已成功儲存為新家庭！');
-  };
-
-  // Component States
-  const [tool, setTool] = useState<'select' | 'pen' | 'eraser'>('select');
-  const [cursorPos, setCursorPos] = useState<{ x: number, y: number } | null>(null);
-  const isDrawing = useRef(false);
-  const [isStrictOrthogonal, setIsStrictOrthogonal] = useState(true);
-  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
-  const [lastSavedPulse, setLastSavedPulse] = useState(false);
-
-  // Manual save function
-  const saveChanges = () => {
-    if (activeProjectId && activeProjectId !== 'draft') {
-      const updatedProjects = projects.map(p => {
-        if (p.id === activeProjectId) {
-          return {
-            ...p,
-            data: { members, unions, children, lines },
-            updatedAt: Date.now()
-          };
-        }
-        return p;
-      });
-      setProjects(updatedProjects);
-      localStorage.setItem('genogram-projects', JSON.stringify(updatedProjects));
-    } else {
-      const draftData = { members, unions, children, lines };
-      localStorage.setItem('genogram-draft', JSON.stringify(draftData));
-    }
-    setHasUnsavedChanges(false);
-    setLastSavedPulse(true);
-    setTimeout(() => setLastSavedPulse(false), 2000);
-  };
-
-  // Track changes to mark as unsaved
-  useEffect(() => {
-    if (members.length > 0) {
-      setHasUnsavedChanges(true);
-    }
-  }, [members, unions, children, lines]);
-
-  const saveToHistory = () => {
-    setHistory(prev => {
-      const newHistory = [...prev, { members, unions, children, lines }];
-      // Keep only last 50 steps
-      if (newHistory.length > 50) return newHistory.slice(1);
-      return newHistory;
-    });
-  };
-
-  const handleUndo = () => {
-    if (history.length === 0) return;
-    const lastState = history[history.length - 1];
-    setMembers(lastState.members);
-    setUnions(lastState.unions);
-    setChildren(lastState.children);
-    setLines(lastState.lines || []);
-    setHistory(prev => prev.slice(0, -1));
-    
-    // Update project state will be handled by the useEffect sync
-  };
-
-  const handleMouseDown = (e: any) => {
-    if (tool === 'select') return;
-    isDrawing.current = true;
-    const stage = e.target.getStage();
-    const pos = stage.getRelativePointerPosition();
-    
-    if (tool === 'pen') {
-      setLines([...lines, { tool, points: [pos.x, pos.y], color: '#4f46e5', isEraser: false }]);
-    } else if (tool === 'eraser') {
-      setLines([...lines, { tool, points: [pos.x, pos.y], color: '#ffffff', isEraser: true }]);
-    }
-  };
-
-  const handleMouseMove = (e: any) => {
-    const stage = e.target.getStage();
-    const point = stage.getRelativePointerPosition();
-    
-    // Update cursor position for eraser feedback
-    if (tool === 'eraser') {
-      setCursorPos(point);
-    } else {
-      setCursorPos(null);
-    }
-
-    if (!isDrawing.current || tool === 'select') return;
-    
-    if (tool === 'pen' || tool === 'eraser') {
-      let lastLine = { ...lines[lines.length - 1] };
-      // add point
-      lastLine.points = lastLine.points.concat([point.x, point.y]);
-
-      // replace last
-      const newLines = [...lines];
-      newLines[newLines.length - 1] = lastLine;
-      setLines(newLines);
-    }
-  };
-
-  const eraseAt = (pos: { x: number, y: number }) => {
-    const threshold = 15;
-    const newLines = lines.filter(line => {
-      for (let i = 0; i < line.points.length; i += 2) {
-        const dx = line.points[i] - pos.x;
-        const dy = line.points[i+1] - pos.y;
-        if (Math.sqrt(dx*dx + dy*dy) < threshold) return false;
-      }
-      return true;
-    });
-    if (newLines.length !== lines.length) {
-      setLines(newLines);
-    }
-  };
-
-  const handleMouseUp = () => {
-    if (isDrawing.current) {
-      saveToHistory();
-    }
-    isDrawing.current = false;
-  };
-
-  const clearDrawings = () => {
-    saveToHistory();
-    setLines([]);
-  };
-
-  const initIndexMember = () => {
-    const indexMember: Member = {
-      id: 'index-member',
-      name: '',
-      gender: 'male',
-      x: window.innerWidth / 2,
-      y: window.innerHeight / 2,
-      isIndex: true,
-    };
-    setMembers([indexMember]);
-    setUnions([]);
-    setChildren([]);
-    setSelectedId(indexMember.id);
-    setSelectedUnionId(null);
-    setScale(1);
-    setPosition({ x: 0, y: 0 });
-  };
-
-  const handleAiRecognize = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    setIsAiParsing(true);
-    try {
-      const reader = new FileReader();
-      reader.onload = async (event) => {
-        const base64 = event.target?.result as string;
-        const result = await recognizeGenogramFromImage(base64, file.type);
-        
-        if (result && result.members) {
-          // Adjust coordinates to be relative to the center of the current view
-          const viewCenter = {
-            x: window.innerWidth / 2,
-            y: window.innerHeight / 2
-          };
-
-          // Scale from AI coordinates (0-1000) to actual canvas coordinates
-          // Centering the reconocized structure
-          const scaledMembers = result.members.map(m => ({
-            ...m,
-            x: (m.x / 1000) * 800 + (viewCenter.x - 400),
-            y: (m.y / 1000) * 800 + (viewCenter.y - 400),
-          }));
-
-          setMembers(scaledMembers);
-          setUnions(result.unions || []);
-          setChildren(result.children || []);
-          setLines([]); // Reset free lines
-          
-          alert('AI 辨識完成！已自動載入家系圖結構。您現在可以繼續編輯。');
-        }
-      };
-      reader.readAsDataURL(file);
-    } catch (error) {
-      console.error('AI Recognition failed:', error);
-      alert('AI 辨識失敗，請稍後再試或換一張圖片。');
-    } finally {
-      setIsAiParsing(false);
-      if (e.target) e.target.value = ''; // Reset input
-    }
-  };
-
-  const handleWheel = (e: any) => {
-    if (isDrawing.current) return; // Disable zoom while actively drawing
-    e.evt.preventDefault();
-    const stage = stageRef.current;
-    if (!stage) return;
-
-    const oldScale = stage.scaleX();
-    const pointer = stage.getPointerPosition();
-    if (!pointer) return;
-
-    const mousePointTo = {
-      x: (pointer.x - stage.x()) / oldScale,
-      y: (pointer.y - stage.y()) / oldScale,
-    };
-
-    const speed = 1.1;
-    const newScale = e.evt.deltaY > 0 ? oldScale / speed : oldScale * speed;
-
-    const limitedScale = Math.max(0.1, Math.min(5, newScale));
-    
-    setScale(limitedScale);
-    setPosition({
-      x: pointer.x - mousePointTo.x * limitedScale,
-      y: pointer.y - mousePointTo.y * limitedScale,
-    });
-  };
-
-  const centerView = () => {
-    if (members.length === 0) return;
-
-    const minX = Math.min(...members.map(m => m.x));
-    const maxX = Math.max(...members.map(m => m.x));
-    const minY = Math.min(...members.map(m => m.y));
-    const maxY = Math.max(...members.map(m => m.y));
-
-    const contentWidth = maxX - minX + 200;
-    const contentHeight = maxY - minY + 200;
-    
-    const scaleX = dimensions.width / contentWidth;
-    const scaleY = dimensions.height / contentHeight;
-    const newScale = Math.min(scaleX, scaleY, 1);
-
-    setScale(newScale);
-    setPosition({
-      x: (dimensions.width - (maxX + minX) * newScale) / 2,
-      y: (dimensions.height - (maxY + minY) * newScale) / 2,
-    });
-  };
-
-  useEffect(() => {
-    // Current state is synced to projects in the other useEffect
-  }, [members, unions, children]);
-
-  useEffect(() => {
-    const handleResize = () => {
-      if (containerRef.current) {
-        setDimensions({
-          width: containerRef.current.offsetWidth,
-          height: containerRef.current.offsetHeight
-        });
-      }
-    };
-    window.addEventListener('resize', handleResize);
-    handleResize();
-    return () => window.removeEventListener('resize', handleResize);
-  }, []);
-
-  const addPartner = (fromId: string) => {
-    const fromMember = members.find(m => m.id === fromId);
-    if (!fromMember) return;
-
-    // Check how many partners this member already has to offset the new one
-    const existingUnions = unions.filter(u => u.partnerAId === fromId || u.partnerBId === fromId);
-    const offset = (existingUnions.length + 1) * 150;
-
-    const newPartner: Member = {
-      id: Math.random().toString(36).substr(2, 9),
-      name: '',
-      gender: fromMember.gender === 'male' ? 'female' : 'male',
-      x: fromMember.x + offset,
-      y: fromMember.y,
-    };
-
-    const newUnion: Union = {
-      id: Math.random().toString(36).substr(2, 9),
-      partnerAId: fromId,
-      partnerBId: newPartner.id,
-      type: 'marriage',
-    };
-
-    saveToHistory();
-    setMembers([...members, newPartner]);
-    setUnions([...unions, newUnion]);
-    setSelectedId(newPartner.id);
-  };
-
-  const addParents = (childId: string) => {
-    const child = members.find(m => m.id === childId);
-    if (!child) return;
-
-    // Check if already has parents
-    const alreadyHasParents = children.some(c => c.memberId === childId);
-    if (alreadyHasParents) return;
-
-    const father: Member = {
-      id: Math.random().toString(36).substr(2, 9),
-      name: '',
-      gender: 'male',
-      x: child.x - 75,
-      y: child.y - 150,
-    };
-
-    const mother: Member = {
-      id: Math.random().toString(36).substr(2, 9),
-      name: '',
-      gender: 'female',
-      x: child.x + 75,
-      y: child.y - 150,
-    };
-
-    const newUnion: Union = {
-      id: Math.random().toString(36).substr(2, 9),
-      partnerAId: father.id,
-      partnerBId: mother.id,
-      type: 'marriage',
-    };
-
-    const newChildRel: Child = {
-      id: Math.random().toString(36).substr(2, 9),
-      unionId: newUnion.id,
-      memberId: childId,
-    };
-
-    saveToHistory();
-    setMembers([...members, father, mother]);
-    setUnions([...unions, newUnion]);
-    setChildren([...children, newChildRel]);
-  };
-
-  const addMultipleChildren = (unionId: string, count: number, isMultipleBirth: boolean) => {
-    const union = unions.find(u => u.id === unionId);
-    if (!union) return;
-
-    const p1 = members.find(m => m.id === union.partnerAId);
-    const p2 = members.find(m => m.id === union.partnerBId);
-    if (!p1 || !p2) return;
-
-    const midX = (p1.x + p2.x) / 2;
-    const midY = (p1.y + p2.y) / 2;
-
-    const existingSiblingRels = children.filter(c => c.unionId === unionId);
-    let targetY = midY + 150;
-    if (existingSiblingRels.length > 0) {
-      const firstSibling = members.find(m => m.id === existingSiblingRels[0].memberId);
-      if (firstSibling) targetY = firstSibling.y;
-    }
-
-    const groupId = isMultipleBirth ? Math.random().toString(36).substr(2, 9) : undefined;
-    const newMembers: Member[] = [];
-    const newRels: Child[] = [];
-
-    // Calculate starting X to center the new group
-    const spacing = 80;
-    const groupWidth = (count - 1) * spacing;
-    const startX = midX - groupWidth / 2 + (existingSiblingRels.length > 0 ? 150 : 0);
-
-    for (let i = 0; i < count; i++) {
-      const member: Member = {
-        id: Math.random().toString(36).substr(2, 9),
-        name: '',
-        gender: 'male',
-        x: startX + i * spacing,
-        y: targetY,
-      };
-      const rel: Child = {
-        id: Math.random().toString(36).substr(2, 9),
-        unionId,
-        memberId: member.id,
-        multipleBirthId: groupId,
-      };
-      newMembers.push(member);
-      newRels.push(rel);
-    }
-
-    saveToHistory();
-    setMembers([...members, ...newMembers]);
-    setChildren([...children, ...newRels]);
-    if (newMembers.length > 0) setSelectedId(newMembers[0].id);
-  };
-
-  const addSibling = (memberId: string) => {
-    const member = members.find(m => m.id === memberId);
-    if (!member) return;
-
-    // Find the union where this member is a child
-    const childRel = children.find(c => c.memberId === memberId);
-    
-    if (childRel) {
-      // If member already has parents, add a child to that union
-      addMultipleChildren(childRel.unionId, 1, false);
-    } else {
-      // If member doesn't have parents, create parents first, then add a sibling
-      const father: Member = {
-        id: Math.random().toString(36).substr(2, 9),
-        name: '',
-        gender: 'male',
-        x: member.x - 75,
-        y: member.y - 150,
-      };
-
-      const mother: Member = {
-        id: Math.random().toString(36).substr(2, 9),
-        name: '',
-        gender: 'female',
-        x: member.x + 75,
-        y: member.y - 150,
-      };
-
-      const newUnion: Union = {
-        id: Math.random().toString(36).substr(2, 9),
-        partnerAId: father.id,
-        partnerBId: mother.id,
-        type: 'marriage',
-      };
-
-      const originalChildRel: Child = {
-        id: Math.random().toString(36).substr(2, 9),
-        unionId: newUnion.id,
-        memberId: memberId,
-      };
-
-      const sibling: Member = {
-        id: Math.random().toString(36).substr(2, 9),
-        name: '',
-        gender: 'male',
-        x: member.x + 150,
-        y: member.y,
-      };
-
-      const siblingRel: Child = {
-        id: Math.random().toString(36).substr(2, 9),
-        unionId: newUnion.id,
-        memberId: sibling.id,
-      };
-
-      saveToHistory();
-      setMembers([...members, father, mother, sibling]);
-      setUnions([...unions, newUnion]);
-      setChildren([...children, originalChildRel, siblingRel]);
-      setSelectedId(sibling.id);
-    }
-  };
-
-  const deleteMember = (id: string) => {
-    saveToHistory();
-    setMembers(prevMembers => {
-      const filteredMembers = prevMembers.filter(m => m.id !== id);
-      const remainingUnions = unions.filter(u => u.partnerAId !== id && u.partnerBId !== id);
-      const remainingChildren = children.filter(c => c.memberId !== id);
-      
-      const finalMembers = [...filteredMembers];
-      remainingUnions.forEach(u => {
-        const unionChildren = remainingChildren.filter(c => c.unionId === u.id);
-        if (unionChildren.length === 1) {
-          const childId = unionChildren[0].memberId;
-          const childIdx = finalMembers.findIndex(m => m.id === childId);
-          if (childIdx !== -1) {
-            const p1 = finalMembers.find(m => m.id === u.partnerAId);
-            const p2 = finalMembers.find(m => m.id === u.partnerBId);
-            if (p1 && p2) {
-              finalMembers[childIdx] = { ...finalMembers[childIdx], x: (p1.x + p2.x) / 2 };
-            }
-          }
-        }
-      });
-      return finalMembers;
-    });
-    setUnions(unions.filter(u => u.partnerAId !== id && u.partnerBId !== id));
-    setChildren(children.filter(c => c.memberId !== id));
-    if (selectedId === id) setSelectedId(null);
-  };
-
-  const deleteUnion = (id: string) => {
-    saveToHistory();
-    setUnions(unions.filter(u => u.id !== id));
-    setChildren(children.filter(c => c.unionId !== id));
-    if (selectedUnionId === id) setSelectedUnionId(null);
-  };
-
-  const updateMember = (updates: Partial<Member>) => {
-    if (!selectedId) return;
-    saveToHistory();
-    setMembers(members.map(m => {
-      if (m.id === selectedId) {
-        return { ...m, ...updates };
-      }
-      return m;
+  const setNormalizedSelectedWords = (words: VocabularyItem[]) => {
+    const normalized = words.map(item => ({
+      ...item,
+      characters: item.characters.map(charItem => ({
+        ...charItem,
+        bopomofo: normalizeBopomofo(charItem.bopomofo)
+      }))
     }));
+    setSelectedWords(normalized);
   };
 
-  const updateUnion = (unionId: string, type: UnionType) => {
-    saveToHistory();
-    setUnions(unions.map(u => u.id === unionId ? { ...u, type } : u));
-  };
-
-  const handleDragEnd = (id: string, e: any) => {
-    const newX = e.target.x();
-    const newY = e.target.y();
-    
-    const member = members.find(m => m.id === id);
-    if (!member) return;
-
-    const dx = newX - member.x;
-    const dy = newY - member.y;
-
-    saveToHistory();
-    setMembers(prevMembers => {
-      let updatedMembers = [...prevMembers];
-      
-      // Move individual member (with Y-sync for same generation)
-      const memberIndex = updatedMembers.findIndex(m => m.id === id);
-      if (memberIndex === -1) return prevMembers;
-
-      updatedMembers[memberIndex] = { ...updatedMembers[memberIndex], x: newX, y: newY };
-
-      // Snap to parent's X if close
-      const childRel = children.find(c => c.memberId === id);
-      if (childRel) {
-        const union = unions.find(u => u.id === childRel.unionId);
-        if (union) {
-          const p1 = updatedMembers.find(m => m.id === union.partnerAId);
-          const p2 = updatedMembers.find(m => m.id === union.partnerBId);
-          if (p1 && p2) {
-            const parentMidX = (p1.x + p2.x) / 2;
-            if (Math.abs(newX - parentMidX) < 20) {
-              updatedMembers[memberIndex] = { ...updatedMembers[memberIndex], x: parentMidX, y: newY };
-            }
-          }
-        }
-      }
-
-      // Find parallel members (spouses and siblings) to keep Y level consistent
-      const parallelIds = new Set<string>();
-      const q = [id];
-      const visited = new Set<string>();
-      
-      while(q.length > 0) {
-        const currentId = q.shift()!;
-        if (visited.has(currentId)) continue;
-        visited.add(currentId);
-        
-        unions.forEach(u => {
-          if (u.partnerAId === currentId) {
-            parallelIds.add(u.partnerBId);
-            q.push(u.partnerBId);
-          } else if (u.partnerBId === currentId) {
-            parallelIds.add(u.partnerAId);
-            q.push(u.partnerAId);
-          }
-        });
-
-        const cRel = children.find(c => c.memberId === currentId);
-        if (cRel) {
-          const siblings = children.filter(c => c.unionId === cRel.unionId);
-          siblings.forEach(s => {
-            parallelIds.add(s.memberId);
-            q.push(s.memberId);
-          });
-        }
-      }
-      parallelIds.delete(id);
-
-      updatedMembers = updatedMembers.map(m => {
-        if (parallelIds.has(m.id)) {
-          return { ...m, y: newY };
-        }
-        return m;
-      });
-
-      // Strict Orthogonal Enforcement: Force parents and children to align vertically
-      if (isStrictOrthogonal) {
-        // We need to iterate and fix alignments
-        // This is a simplified enforcement: find unions and their children, then center them
-        unions.forEach(union => {
-          const unionChildren = children.filter(c => c.unionId === union.id);
-          if (unionChildren.length === 0) return;
-
-          const p1Idx = updatedMembers.findIndex(m => m.id === union.partnerAId);
-          const p2Idx = updatedMembers.findIndex(m => m.id === union.partnerBId);
-          if (p1Idx === -1 || p2Idx === -1) return;
-
-          const childMembers = unionChildren
-            .map(c => updatedMembers.find(m => m.id === c.memberId))
-            .filter((m): m is Member => !!m);
-          
-          if (childMembers.length === 0) return;
-
-          const parentMidX = (updatedMembers[p1Idx].x + updatedMembers[p2Idx].x) / 2;
-          const childrenXSum = childMembers.reduce((sum, m) => sum + m.x, 0);
-          const childrenMidX = childrenXSum / childMembers.length;
-
-          const diff = parentMidX - childrenMidX;
-
-          if (Math.abs(diff) > 0.1) {
-            // If we are dragging a child (or one of its descendants), move parents to align
-            // To make it feel "strict", we move the parents' entire vertical chain
-            const isDraggingChild = unionChildren.some(c => c.memberId === id);
-            
-            // Check if the dragged item is a descendant of any child in this union
-            const isDescendant = (startId: string, targetUnionId: string): boolean => {
-              const rel = children.find(c => c.memberId === startId);
-              if (!rel) return false;
-              if (rel.unionId === targetUnionId) return true;
-              const u = unions.find(un => un.id === rel.unionId);
-              if (!u) return false;
-              return isDescendant(u.partnerAId, targetUnionId) || isDescendant(u.partnerBId, targetUnionId);
-            };
-
-            if (isDraggingChild || isDescendant(id, union.id)) {
-              const moveX = -diff;
-              // Move parents and their ancestors
-              const toMove = new Set<string>();
-              const q = [union.partnerAId, union.partnerBId];
-              while(q.length > 0) {
-                const curr = q.shift()!;
-                if (toMove.has(curr)) continue;
-                toMove.add(curr);
-                const cRel = children.find(c => c.memberId === curr);
-                if (cRel) {
-                  const u = unions.find(un => un.id === cRel.unionId);
-                  if (u) {
-                    q.push(u.partnerAId);
-                    q.push(u.partnerBId);
-                  }
-                }
-              }
-              updatedMembers = updatedMembers.map(m => {
-                if (toMove.has(m.id)) return { ...m, x: m.x + moveX };
-                return m;
-              });
-            } else {
-              // If we are dragging a parent, move children to align
-              const moveX = diff;
-              // Move all children and their descendants
-              const toMove = new Set<string>();
-              const q = unionChildren.map(c => c.memberId);
-              while(q.length > 0) {
-                const curr = q.shift()!;
-                if (toMove.has(curr)) continue;
-                toMove.add(curr);
-                unions.forEach(u => {
-                  if (u.partnerAId === curr || u.partnerBId === curr) {
-                    children.forEach(c => {
-                      if (c.unionId === u.id) q.push(c.memberId);
-                    });
-                  }
-                });
-              }
-              updatedMembers = updatedMembers.map(m => {
-                if (toMove.has(m.id)) return { ...m, x: m.x + moveX };
-                return m;
-              });
-            }
-          }
-        });
-      }
-
-      return updatedMembers;
-    });
-  };
-
-  const exportImage = () => {
-    if (stageRef.current) {
-      const stage = stageRef.current;
-      const layer = stage.getLayers()[0];
-      
-      // Get the bounding box of all content in the layer (screen space)
-      const box = layer.getClientRect();
-      
-      // Get the bounding box relative to the layer (local space)
-      const layerBox = layer.getClientRect({ relativeTo: layer });
-      
-      let bg: any = null;
-      if (exportWithBackground) {
-        bg = new Konva.Rect({
-          x: layerBox.x - 50,
-          y: layerBox.y - 50,
-          width: layerBox.width + 100,
-          height: layerBox.height + 100,
-          fill: 'white',
-          listening: false,
-        });
-        layer.add(bg);
-        bg.moveToBottom();
-      }
-
-      const uri = stage.toDataURL({
-        x: box.x - 50,
-        y: box.y - 50,
-        width: box.width + 100,
-        height: box.height + 100,
-        pixelRatio: 2,
-      });
-
-      if (bg) {
-        bg.destroy();
-      }
-
-      const link = document.createElement('a');
-      link.download = 'genogram.png';
-      link.href = uri;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
+  // Helper for actual expected symbols sequence (forces space for 1st tone)
+  const getCharacterTargetSymbols = (bopomofo: string) => {
+    const normalized = normalizeBopomofo(bopomofo);
+    const base = Array.from(normalized);
+    const hasTone = /[ˊˇˋ˙ˉ]/.test(normalized);
+    if (hasTone) {
+      return base;
+    } else {
+      return [...base, ' '];
     }
   };
 
-  const [showConfirmReset, setShowConfirmReset] = useState(false);
+  // Retrieve current active word
+  const activeWord: VocabularyItem | undefined = selectedWords[currentWordIndex];
+  
+  // Retrieve current active character
+  const activeChar = activeWord?.characters[currentCharacterIndex];
 
-  const newFile = () => {
-    // Determine center coordinates
-    const centerX = (dimensions.width > 0 ? dimensions.width : window.innerWidth) / 2;
-    const centerY = (dimensions.height > 0 ? dimensions.height : window.innerHeight) / 2;
+  const targetSymbols = activeChar ? getCharacterTargetSymbols(activeChar.bopomofo) : [];
 
-    const resetData = {
-      members: [{
-        id: 'index-member',
-        name: '',
-        gender: 'male' as Gender,
-        x: centerX,
-        y: centerY,
-        isIndex: true,
-      }],
-      unions: [],
-      children: [],
-      lines: []
+  // Automatically initialize typedWordSymbols when activeWord changes or game starts
+  useEffect(() => {
+    if (activeWord) {
+      setTypedWordSymbols(activeWord.characters.map(() => []));
+      setCurrentCharacterIndex(0);
+      setWrongAnswer(false);
+      setWrongCharIndices([]);
+    } else {
+      setTypedWordSymbols([]);
+      setWrongCharIndices([]);
+    }
+  }, [currentWordIndex, selectedWords]);
+
+  // Adjust sound synthesizer state matching soundEnabled configuration
+  useEffect(() => {
+    audioSynth.enabled = soundEnabled;
+  }, [soundEnabled]);
+
+  // Game timer loop
+  useEffect(() => {
+    if (timerActive && !infiniteTime) {
+      timerRef.current = setInterval(() => {
+        setTimeRemaining((prev) => {
+          if (prev <= 1) {
+            clearInterval(timerRef.current!);
+            setTimerActive(false);
+            endGame();
+            return 0;
+          }
+          return prev - 1;
+        });
+        setStats(prev => ({
+          ...prev,
+          totalTimeSpent: prev.totalTimeSpent + 1
+        }));
+      }, 1000);
+    } else if (timerActive && infiniteTime) {
+      timerRef.current = setInterval(() => {
+        setStats(prev => ({
+          ...prev,
+          totalTimeSpent: prev.totalTimeSpent + 1
+        }));
+      }, 1000);
+    }
+
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, [timerActive, infiniteTime]);
+
+  // Poll PK state when playing
+  useEffect(() => {
+    let intervalId: any = null;
+
+    if (gameMode === 'play' && textbook === '1v1 PK 對戰' && pkRoomCode && pkUsername) {
+      const runPoll = async () => {
+        try {
+          const totalKeys = stats.correctCount + stats.incorrectCount;
+          const currentAccuracy = totalKeys > 0 ? Math.round((stats.correctCount / totalKeys) * 100) : 100;
+
+          const payload = {
+            roomCode: pkRoomCode,
+            username: pkUsername,
+            score: stats.score,
+            completedCount: completedWordItems.length,
+            correctCount: stats.correctCount,
+            incorrectCount: stats.incorrectCount,
+            accuracy: currentAccuracy,
+            isFinished: false
+          };
+
+          const res = await fetch('/api/pk/update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          const data = await res.json();
+          if (data.success) {
+            setPkRoomState(data.room);
+          }
+        } catch (err) {
+          console.error('Error polling PK status in play:', err);
+        }
+      };
+
+      runPoll();
+      intervalId = setInterval(runPoll, 1500);
+    }
+
+    return () => {
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [gameMode, textbook, pkRoomCode, pkUsername, stats.score, completedWordItems.length, stats.correctCount, stats.incorrectCount]);
+
+  // Poll PK state when on Result screen
+  useEffect(() => {
+    let intervalId: any = null;
+
+    if (gameMode === 'result' && textbook === '1v1 PK 對戰' && pkRoomCode && pkUsername) {
+      const runPoll = async () => {
+        try {
+          const totalKeys = stats.correctCount + stats.incorrectCount;
+          const currentAccuracy = totalKeys > 0 ? Math.round((stats.correctCount / totalKeys) * 100) : 100;
+
+          const payload = {
+            roomCode: pkRoomCode,
+            username: pkUsername,
+            score: stats.score,
+            completedCount: completedWordItems.length,
+            correctCount: stats.correctCount,
+            incorrectCount: stats.incorrectCount,
+            accuracy: currentAccuracy,
+            isFinished: true
+          };
+
+          const res = await fetch('/api/pk/update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          const data = await res.json();
+          if (data.success) {
+            setPkRoomState(data.room);
+          }
+        } catch (err) {
+          console.error('Error polling PK status in result:', err);
+        }
+      };
+
+      runPoll();
+      intervalId = setInterval(runPoll, 2000);
+    }
+
+    return () => {
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [gameMode, textbook, pkRoomCode, pkUsername, stats.score, completedWordItems.length, stats.correctCount, stats.incorrectCount]);
+
+  // Classroom Countdown effect for synchronous matchstart
+  useEffect(() => {
+    let intervalId: any = null;
+    if (pkCountdown > 0) {
+      intervalId = setInterval(() => {
+        setPkCountdown(prev => {
+          if (prev <= 1) {
+            clearInterval(intervalId);
+            // Trigger actual game-start!
+            setGameMode('play');
+            setTimerActive(true);
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    }
+    return () => {
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [pkCountdown]);
+
+  // Handle AI Topic generation via Gemini server-side route
+  const handleAiGenerateTopic = async () => {
+    if (!aiTopic.trim()) return;
+    setLoading(true);
+    setApiError(null);
+    try {
+      const response = await fetch('/api/gemini/generate-topic', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ topic: aiTopic, limit: questionCountLimit })
+      });
+      const resData = await response.json();
+      if (!response.ok || !resData.success) {
+        throw new Error(resData.error || '無法呼叫伺服器 API，請確認後台運作或檢視 Settings Secrets。');
+      }
+      
+      let words = resData.data;
+      if (playModeType !== 'timeAttack' && questionCountLimit > 0 && words.length > questionCountLimit) {
+        words = words.slice(0, questionCountLimit);
+      }
+
+      setNormalizedSelectedWords(words);
+      setCurrentWordIndex(0);
+      setCurrentCharacterIndex(0);
+      setTypedWordSymbols(words.length > 0 ? words[0].characters.map(() => []) : []);
+      setWrongAnswer(false);
+      setCompletedWordItems([]);
+      setTimeRemaining(timeLimit);
+      setGameMode('play');
+      setTimerActive(true);
+      setStats({
+        correctCount: 0,
+        incorrectCount: 0,
+        completedCount: 0,
+        startTime: Date.now(),
+        totalTimeSpent: 0,
+        multiplier: 1,
+        score: 0
+      });
+      audioSynth.playLevelSuccess();
+    } catch (err: any) {
+      console.error(err);
+      setApiError(err.message || '主題產生失敗。請手動切換至「自訂題目」或是重新嘗試。');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Handle Custom text parsing from paste input
+  const handleCustomTextParse = async () => {
+    if (!customText.trim()) return;
+    setLoading(true);
+    setApiError(null);
+    try {
+      let finalWords: VocabularyItem[] = [];
+      // Attempt Server-Side Conversion with Gemini
+      const response = await fetch('/api/gemini/convert-text', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: customText, limit: questionCountLimit })
+      });
+      const resData = await response.json();
+      
+      if (response.ok && resData.success && resData.data && resData.data.length > 0) {
+        finalWords = resData.data;
+      } else {
+        // Fall back gracefully to offline converter
+        console.warn('Gemini server convert failed, falling back to local dictionaries');
+        const parsedOffline = convertTextToVocabularyOffline(customText, questionCountLimit);
+        if (parsedOffline.length === 0) {
+          throw new Error('無法從內容解析出中文字。');
+        }
+        finalWords = parsedOffline;
+      }
+      
+      if (playModeType !== 'timeAttack' && questionCountLimit > 0 && finalWords.length > questionCountLimit) {
+        finalWords = finalWords.slice(0, questionCountLimit);
+      }
+
+      setNormalizedSelectedWords(finalWords);
+      setCurrentWordIndex(0);
+      setCurrentCharacterIndex(0);
+      setTypedWordSymbols(finalWords.length > 0 ? finalWords[0].characters.map(() => []) : []);
+      setWrongAnswer(false);
+      setCompletedWordItems([]);
+      setTimeRemaining(timeLimit);
+      setGameMode('play');
+      setTimerActive(true);
+      setStats({
+        correctCount: 0,
+        incorrectCount: 0,
+        completedCount: 0,
+        startTime: Date.now(),
+        totalTimeSpent: 0,
+        multiplier: 1,
+        score: 0
+      });
+      audioSynth.playLevelSuccess();
+    } catch (err: any) {
+      console.error(err);
+      setApiError(err.message || '自訂題目載入出錯，請確認字句。');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Handle PK Room creation
+  const handleCreatePkRoom = async () => {
+    if (!pkRoomCode.trim()) {
+      setPkLobbyError('請輸入對戰房號（例如：1234）');
+      return;
+    }
+    if (!pkUsername.trim()) {
+      setPkLobbyError('請輸入您的玩家暱稱');
+      return;
+    }
+
+    setPkLoading(true);
+    setPkLobbyError('');
+
+    try {
+      let finalWords: VocabularyItem[] = [];
+
+      // Generate or convert words depending on pkQuestionSource
+      if (pkQuestionSource === 'ai') {
+        const topicToGenerate = pkAiTopic.trim() || '太空探險';
+        const response = await fetch('/api/gemini/generate-topic', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ topic: topicToGenerate, limit: questionCountLimit })
+        });
+        const resData = await response.json();
+        if (!response.ok || !resData.success) {
+          throw new Error(resData.error || '無法透過 AI 產生對戰題目，請檢查網路或確認 API 金鑰配對。');
+        }
+        finalWords = resData.data;
+      } else {
+        const textToConvert = pkCustomText.trim() || customText;
+        if (!textToConvert.trim()) {
+          throw new Error('請輸入對戰自訂題目字句！');
+        }
+        try {
+          const response = await fetch('/api/gemini/convert-text', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: textToConvert, limit: questionCountLimit })
+          });
+          const resData = await response.json();
+          if (response.ok && resData.success && resData.data && resData.data.length > 0) {
+            finalWords = resData.data;
+          } else {
+            console.warn('Gemini server convert failed for PK, falling back offline');
+            finalWords = convertTextToVocabularyOffline(textToConvert, questionCountLimit);
+          }
+        } catch (convertErr) {
+          console.warn('Network error or convert failed for PK, falling back offline');
+          finalWords = convertTextToVocabularyOffline(textToConvert, questionCountLimit);
+        }
+      }
+
+      if (finalWords.length === 0) {
+        throw new Error('無法從目前設定的內容產生對戰詞彙！請確認輸入是否包含中文字。');
+      }
+
+      // Respect the questionCountLimit
+      if (finalWords.length > questionCountLimit) {
+        finalWords = finalWords.slice(0, questionCountLimit);
+      }
+
+      const payload = {
+        roomCode: pkRoomCode,
+        username: pkUsername,
+        selectedWords: finalWords.map(item => ({
+          ...item,
+          characters: item.characters.map(charItem => ({
+            ...charItem,
+            bopomofo: normalizeBopomofo(charItem.bopomofo)
+          }))
+        })),
+        timeLimit: timeLimit
+      };
+
+      const res = await fetch('/api/pk/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || '房號建立失敗');
+      }
+
+      setPkRoomState(data.room);
+      setNormalizedSelectedWords(finalWords);
+      setIsPkPolling(true); // Begin checking for second player inside lobby
+      audioSynth.playClick();
+    } catch (err: any) {
+      console.error(err);
+      setPkLobbyError(err.message || '建立房間時遭遇錯誤，請確認網路與對手連線。');
+    } finally {
+      setPkLoading(false);
+    }
+  };
+
+  // Handle Joining an established PK Room
+  const handleJoinPkRoom = async () => {
+    if (!pkRoomCode.trim()) {
+      setPkLobbyError('請輸入對戰房號（例如：1234）');
+      return;
+    }
+    if (!pkUsername.trim()) {
+      setPkLobbyError('請輸入您的玩家暱稱');
+      return;
+    }
+
+    setPkLoading(true);
+    setPkLobbyError('');
+
+    try {
+      const payload = {
+        roomCode: pkRoomCode,
+        username: pkUsername
+      };
+
+      const res = await fetch('/api/pk/join', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || '進入房間失敗，請確認房號是否正確且未滿。');
+      }
+
+      const room = data.room;
+      setPkRoomState(room);
+      setNormalizedSelectedWords(room.selectedWords);
+      setTimeLimit(room.timeLimit);
+      setTimeRemaining(room.timeLimit);
+
+      // Start lobby matching sync
+      setIsPkPolling(true);
+      audioSynth.playClick();
+    } catch (err: any) {
+      console.error(err);
+      setPkLobbyError(err.message || '加入房間時遭遇錯誤，請確認房號代碼是否已被建立。');
+    } finally {
+      setPkLoading(false);
+    }
+  };
+
+  // Poll matching status while players wait in the lobby setup cards
+  useEffect(() => {
+    let intervalId: any = null;
+
+    if (gameMode === 'setup' && textbook === '1v1 PK 對戰' && isPkPolling && pkRoomCode && pkUsername) {
+      const lobbyPoll = async () => {
+        try {
+          const res = await fetch('/api/pk/update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              roomCode: pkRoomCode,
+              username: pkUsername,
+              score: 0,
+              completedCount: 0,
+              correctCount: 0,
+              incorrectCount: 0,
+              accuracy: 100,
+              isFinished: false
+            })
+          });
+          const data = await res.json();
+          if (data.success) {
+            setPkRoomState(data.room);
+
+            // Synchronize starting triggers
+            if (data.room.status === 'starting') {
+              setIsPkPolling(false);
+              setPkCountdown(3); // Trigger visual countdown: 3, 2, 1, GO!
+              
+              setStats({
+                correctCount: 0,
+                incorrectCount: 0,
+                completedCount: 0,
+                startTime: Date.now(),
+                totalTimeSpent: 0,
+                multiplier: 1,
+                score: 0
+              });
+              setCompletedWordItems([]);
+              setCurrentWordIndex(0);
+              setCurrentCharacterIndex(0);
+            }
+          }
+        } catch (e) {
+          console.error('Lobby polling error:', e);
+        }
+      };
+
+      lobbyPoll();
+      intervalId = setInterval(lobbyPoll, 1500);
+    }
+
+    return () => {
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [gameMode, textbook, isPkPolling, pkRoomCode, pkUsername]);
+
+  // Exit game and gather final analytics
+  const endGame = async () => {
+    setTimerActive(false);
+    setGameMode('result');
+    audioSynth.playLevelSuccess();
+
+    // If online PK mode, send final game finished status report
+    if (textbook === '1v1 PK 對戰' && pkRoomCode && pkUsername) {
+      try {
+        const totalKeys = stats.correctCount + stats.incorrectCount;
+        const currentAccuracy = totalKeys > 0 ? Math.round((stats.correctCount / totalKeys) * 100) : 100;
+        
+        const payload = {
+          roomCode: pkRoomCode,
+          username: pkUsername,
+          score: stats.score,
+          completedCount: completedWordItems.length,
+          correctCount: stats.correctCount,
+          incorrectCount: stats.incorrectCount,
+          accuracy: currentAccuracy,
+          isFinished: true
+        };
+
+        const res = await fetch('/api/pk/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (data.success) {
+          setPkRoomState(data.room);
+        }
+      } catch (err) {
+        console.error('Error ending PK stats:', err);
+      }
+    }
+  };
+
+  // Process a Bopomofo character key press
+  const handleBopomofoInput = (symbol: string) => {
+    if (gameMode !== 'play' || !activeWord) return;
+    
+    // Animate visual keypress style
+    setPhysicalKeyPress(symbol);
+    setTimeout(() => setPhysicalKeyPress(null), 100);
+
+    const activeCharItem = activeWord.characters[currentCharacterIndex];
+    if (!activeCharItem) return;
+
+    const targetSymbols = getCharacterTargetSymbols(activeCharItem.bopomofo);
+    const currentTyped = typedWordSymbols[currentCharacterIndex] || [];
+
+    // Allow typing only if we haven't reached the max size of target symbols
+    if (currentTyped.length < targetSymbols.length) {
+      let actualSymbol = symbol;
+      // In Bopomofo input layout, if they entered Spacebar ' ' it can represent ' ' or 'ˉ'
+      const expectedSymbol = targetSymbols[currentTyped.length];
+      if ((expectedSymbol === ' ' || expectedSymbol === 'ˉ') && (symbol === ' ' || symbol === 'ˉ')) {
+        actualSymbol = expectedSymbol; // standardise
+      }
+
+      const nextTyped = [...currentTyped, actualSymbol];
+      const nextWordSymbols = [...typedWordSymbols];
+      nextWordSymbols[currentCharacterIndex] = nextTyped;
+      setTypedWordSymbols(nextWordSymbols);
+      
+      // Play a normal keypress click sound without doing active correctness checks yet
+      audioSynth.playClick();
+
+      setWrongAnswer(false); // Clear incorrect mark as they change/type
+      setWrongCharIndices(prev => prev.filter(idx => idx !== currentCharacterIndex)); // Clear this character's error red flag when re-typing!
+
+      // Auto-advance focus to next character box once current is completely filled (even with incorrect typing)
+      if (nextTyped.length === targetSymbols.length) {
+        if (currentCharacterIndex < activeWord.characters.length - 1) {
+          audioSynth.playCharCorrect();
+          setCurrentCharacterIndex((prev) => prev + 1);
+        }
+      }
+    } else {
+      // Length exceeded style flash
+      setWrongKeyFlash(true);
+      setTimeout(() => setWrongKeyFlash(false), 200);
+      audioSynth.playError();
+    }
+  };
+
+  // Skip current word question
+  const handleSkipWord = () => {
+    if (gameMode !== 'play' || !activeWord) return;
+    audioSynth.playClick();
+    advanceNextWord();
+  };
+
+  // Submit current typed word answer
+  const handleSubmitWord = () => {
+    if (gameMode !== 'play' || !activeWord) return;
+
+    let allCorrect = true;
+    const incorrectIndices: number[] = [];
+
+    let localCorrectKeys = 0;
+    let localIncorrectKeys = 0;
+
+    for (let charIdx = 0; charIdx < activeWord.characters.length; charIdx++) {
+      const charItem = activeWord.characters[charIdx];
+      const expected = getCharacterTargetSymbols(charItem.bopomofo);
+      const typed = typedWordSymbols[charIdx] || [];
+
+      let charCorrect = true;
+      for (let sIdx = 0; sIdx < expected.length; sIdx++) {
+        const eSym = expected[sIdx];
+        const tSym = typed[sIdx];
+        if (tSym === undefined) {
+          charCorrect = false;
+          localIncorrectKeys++;
+        } else {
+          const isSymCorrect = (eSym === ' ' || eSym === 'ˉ')
+            ? (tSym === ' ' || tSym === 'ˉ')
+            : (tSym === eSym);
+          if (isSymCorrect) {
+            localCorrectKeys++;
+          } else {
+            charCorrect = false;
+            localIncorrectKeys++;
+          }
+        }
+      }
+
+      if (typed.length > expected.length) {
+        localIncorrectKeys += (typed.length - expected.length);
+        charCorrect = false;
+      }
+
+      if (!charCorrect) {
+        incorrectIndices.push(charIdx);
+        allCorrect = false;
+      }
+    }
+
+    if (allCorrect) {
+      audioSynth.playWordCorrect();
+      setWrongAnswer(false);
+      setWrongCharIndices([]);
+      setCompletedWordItems((prev) => [...prev, activeWord]);
+      
+      setStats(prev => {
+        const nextMultiplier = Math.min(5, prev.multiplier + 0.25);
+        return {
+          ...prev,
+          correctCount: prev.correctCount + localCorrectKeys,
+          incorrectCount: prev.incorrectCount + localIncorrectKeys,
+          completedCount: prev.completedCount + 1,
+          multiplier: parseFloat(nextMultiplier.toFixed(1)),
+          score: prev.score + Math.round(150 * prev.multiplier)
+        };
+      });
+
+      advanceNextWord();
+    } else {
+      setWrongAnswer(true);
+      setWrongCharIndices(incorrectIndices); // Put red outlines specifically on error character boxes!
+      setWrongKeyFlash(true);
+      setTimeout(() => setWrongKeyFlash(false), 200);
+
+      setStats(prev => ({
+        ...prev,
+        correctCount: prev.correctCount + localCorrectKeys,
+        incorrectCount: prev.incorrectCount + localIncorrectKeys,
+        multiplier: 1 // Reset multiplier on incorrect submit
+      }));
+      audioSynth.playError();
+    }
+  };
+
+  // Helper to advance to next word, wrap around, or end game
+  const advanceNextWord = () => {
+    if (playModeType === 'timeAttack') {
+      if (currentWordIndex < selectedWords.length - 1) {
+        setCurrentWordIndex((prev) => prev + 1);
+      } else {
+        // Wrap around in time attack mode to guarantee continuous typing
+        setCurrentWordIndex(0);
+      }
+    } else {
+      if (currentWordIndex < selectedWords.length - 1) {
+        setCurrentWordIndex((prev) => prev + 1);
+      } else {
+        endGame();
+      }
+    }
+  };
+
+  // Backspace supports correction across phonetic syllables
+  const handleBackspace = () => {
+    audioSynth.playClick();
+    const currentTyped = typedWordSymbols[currentCharacterIndex] || [];
+    if (currentTyped.length > 0) {
+      const nextTyped = currentTyped.slice(0, currentTyped.length - 1);
+      const nextWordSymbols = [...typedWordSymbols];
+      nextWordSymbols[currentCharacterIndex] = nextTyped;
+      setTypedWordSymbols(nextWordSymbols);
+      setWrongAnswer(false);
+      setWrongCharIndices(prev => prev.filter(idx => idx !== currentCharacterIndex)); // clear errors
+    } else if (currentCharacterIndex > 0) {
+      const prevCharIndex = currentCharacterIndex - 1;
+      const prevTyped = typedWordSymbols[prevCharIndex] || [];
+      const nextTyped = prevTyped.slice(0, Math.max(0, prevTyped.length - 1));
+      const nextWordSymbols = [...typedWordSymbols];
+      nextWordSymbols[prevCharIndex] = nextTyped;
+      setTypedWordSymbols(nextWordSymbols);
+      setCurrentCharacterIndex(prevCharIndex);
+      setWrongAnswer(false);
+      setWrongCharIndices(prev => prev.filter(idx => idx !== prevCharIndex)); // clear errors
+    }
+  };
+
+  // Key event capturing physical layout mapping
+  useEffect(() => {
+    const handlePhysicalKeyDown = (e: KeyboardEvent) => {
+      if (gameMode !== 'play') return;
+
+      // Handle custom block key exceptions
+      if (e.key === 'Backspace') {
+        e.preventDefault();
+        handleBackspace();
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        endGame();
+        return;
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        handleSubmitWord();
+        return;
+      }
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        handleSkipWord();
+        return;
+      }
+      
+      const key = e.key.toLowerCase();
+      
+      // Stop space bar scrolling page
+      if (e.key === ' ') {
+        e.preventDefault();
+        handleBopomofoInput(' ');
+        return;
+      }
+
+      if (KEY_TO_BOPOMOFO[key]) {
+        e.preventDefault();
+        handleBopomofoInput(KEY_TO_BOPOMOFO[key]);
+      }
     };
 
-    // Update current working state
-    setMembers(resetData.members);
-    setUnions(resetData.unions);
-    setChildren(resetData.children);
-    setLines(resetData.lines);
-    setHistory([]);
-    setSelectedId('index-member');
-    setSelectedUnionId(null);
-    setScale(1);
-    setPosition({ x: 0, y: 0 });
-    setShowConfirmReset(false);
+    window.addEventListener('keydown', handlePhysicalKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handlePhysicalKeyDown);
+    };
+  }, [gameMode, currentWordIndex, currentCharacterIndex, typedWordSymbols, selectedWords, playModeType]);
 
-    // Also immediately push to project list and storage to be absolutely sure
-    if (activeProjectId) {
-      setProjects(prevProjects => {
-        const updatedProjects = prevProjects.map(p => {
-          if (p.id === activeProjectId) {
-            return {
-              ...p,
-              data: resetData,
-              updatedAt: Date.now()
-            };
-          }
-          return p;
-        });
-        localStorage.setItem('genogram-projects', JSON.stringify(updatedProjects));
-        return updatedProjects;
-      });
-    }
-  };
-
-  const selectedMember = members.find(m => m.id === selectedId);
-  const selectedUnion = unions.find(u => u.id === selectedUnionId);
+  // Compute stats helper
+  const totalKeystrokes = stats.correctCount + stats.incorrectCount;
+  const accuracyPercent = totalKeystrokes > 0 ? Math.round((stats.correctCount / totalKeystrokes) * 100) : 100;
+  
+  // Characters Per Minute (CPM) metric
+  const minutesSpent = stats.totalTimeSpent > 0 ? stats.totalTimeSpent / 60 : 0.01;
+  const cpmSpeed = Math.round(stats.correctCount / minutesSpent);
 
   return (
-    <>
-      <div className="flex h-screen w-screen bg-zinc-50 font-sans overflow-hidden">
-      {/* Sidebar */}
-      <div className="w-80 bg-white border-r border-zinc-200 flex flex-col shadow-sm z-10">
-        
-        {/* Compact Header & Mode Selector */}
-        <div className="bg-white border-b border-zinc-100 flex flex-col pt-4 pb-2 px-4 gap-3">
-          <div className="flex items-center gap-2 pb-1">
-            <Settings2 className="w-4 h-4 text-indigo-600" />
-            <span className="text-sm font-bold tracking-tight text-zinc-900">家系圖繪製</span>
+    <div id="app_frame" className="min-h-screen bg-stone-50 text-slate-800 font-sans flex flex-col antialiased">
+      {/* Header Bar */}
+      <header id="app_header" className="border-b border-stone-200 bg-white/70 backdrop-blur-md sticky top-0 z-50 transition-all duration-200">
+        <div className="max-w-7xl mx-auto px-4 py-3 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 bg-amber-500 text-white rounded-xl shadow-inner shadow-amber-600/20">
+              <KeyboardIcon className="w-6 h-6 animate-pulse" />
+            </div>
+            <div>
+              <h1 className="text-xl font-bold tracking-tight text-slate-900 flex items-center gap-2">
+                注音打字大進擊 <span className="text-xs bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full font-medium">100% 題目無注音版</span>
+              </h1>
+              <p className="text-xs text-slate-500">
+                專為台灣學童及注音學習者設計。聽音思考，打入正確注音符號（QWERTY 鍵盤對應）
+              </p>
+            </div>
           </div>
 
-          <div className="flex p-0.5 bg-zinc-100 rounded-lg">
-            <button 
-              onClick={switchToDraft}
-              className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-md text-[11px] font-bold transition-all ${!activeProjectId ? 'bg-white text-indigo-600 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
+          <div className="flex items-center gap-3 text-sm">
+            {/* Audio Toggle */}
+            <button
+              id="sound_toggle_btn"
+              onClick={() => setSoundEnabled(!soundEnabled)}
+              className={`p-2 rounded-xl border flex items-center gap-1.5 transition-all ${
+                soundEnabled 
+                  ? 'bg-amber-50 border-amber-200 text-amber-800' 
+                  : 'bg-stone-100 border-stone-200 text-slate-400'
+              }`}
+              title="啟用/禁用鍵盤點擊與獎勵提示音"
             >
-              <Pencil className="w-3 h-3" />
-              隨手記
+              {soundEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
+              <span className="font-medium">{soundEnabled ? '音效：開' : '靜音'}</span>
             </button>
-            <button 
-              onClick={() => setIsProjectModalOpen(true)}
-              className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-md text-[11px] font-bold transition-all ${activeProjectId ? 'bg-white text-indigo-600 shadow-sm' : 'text-zinc-500 hover:text-zinc-700'}`}
+
+            {/* Helper Hint Toggle */}
+            <button
+              id="highlight_toggle_btn"
+              onClick={() => setHighlightHelper(!highlightHelper)}
+              className={`p-2 rounded-xl border flex items-center gap-1.5 transition-all ${
+                highlightHelper 
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800' 
+                  : 'bg-stone-100 border-stone-200 text-slate-400'
+              }`}
+              title="提示哪些鍵對應當前所需注音"
             >
-              <FolderOpen className="w-3 h-3" />
-              案家管理中心
+              <Info className="w-4 h-4" />
+              <span className="font-medium">{highlightHelper ? '輔助高亮：開' : '無鍵盤提示'}</span>
             </button>
           </div>
         </div>
+      </header>
 
-        {/* Compact Context Bar */}
-        <div className="px-4 py-2 border-b border-zinc-100 bg-zinc-50/30 flex items-center justify-between min-h-[44px]">
-          <div className="flex items-center gap-2 min-w-0 flex-1">
-            <div className={`p-1 rounded ${activeProjectId ? 'bg-indigo-100 text-indigo-600' : 'bg-zinc-200 text-zinc-500'}`}>
-              {activeProjectId ? <FolderOpen className="w-3 h-3" /> : <Pencil className="w-3 h-3" />}
-            </div>
-            <span className={`text-[11px] font-bold truncate ${activeProjectId ? 'text-indigo-900' : 'text-zinc-600'}`}>
-              {activeProjectId ? (projects.find(p => p.id === activeProjectId)?.name || '未命名家庭') : '正在使用草稿'}
-            </span>
-          </div>
+      {/* Main Container */}
+      <main id="app_main" className="flex-1 max-w-7xl w-full mx-auto px-4 py-8 sm:px-6 lg:px-8 flex flex-col justify-center">
+        <AnimatePresence mode="wait">
           
-          <div className="flex items-center gap-1">
-            {!activeProjectId ? (
-              <button 
-                onClick={saveCurrentToNewProject}
-                className="text-indigo-600 hover:text-indigo-700 text-[10px] font-bold flex items-center gap-1 bg-white border border-indigo-100 px-2 py-1 rounded shadow-sm hover:shadow"
-              >
-                <Save className="w-2.5 h-2.5" />
-                儲存
-              </button>
-            ) : (
-              <button 
-                 onClick={() => {
-                   const currentProject = projects.find(p => p.id === activeProjectId);
-                   const newName = prompt('重新命名家庭', currentProject?.name);
-                   if (newName && activeProjectId) renameProject(activeProjectId, newName);
-                 }}
-                 className="p-1 text-zinc-400 hover:text-indigo-600 hover:bg-white rounded transition-all"
-                 title="重新命名"
-              >
-                <Edit3 className="w-3 h-3" />
-              </button>
-            )}
-          </div>
-        </div>
-
-        <div className="flex-1 overflow-y-auto p-4 space-y-6">
-          {members.length === 0 && (
-            <motion.section 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              className="space-y-4"
-            >
-              <div className="p-6 bg-indigo-50 rounded-2xl border border-indigo-100 text-center">
-                <Users className="w-12 h-12 text-indigo-300 mx-auto mb-3" />
-                <h3 className="text-sm font-bold text-indigo-900 mb-1">畫布目前是空的</h3>
-                <p className="text-[11px] text-indigo-600 mb-4">請新增第一個成員（案主）來開始繪製家系圖</p>
-                <button 
-                  onClick={initIndexMember}
-                  className="w-full flex items-center justify-center gap-2 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-medium hover:bg-indigo-700 transition-all shadow-sm"
-                >
-                  <Plus className="w-4 h-4" />
-                  新增案主
-                </button>
-              </div>
-            </motion.section>
-          )}
-
-          {selectedMember && (
-            <motion.section 
-              initial={{ opacity: 0, y: 10 }}
+          {/* ==================== 1. SETUP SCREEN ==================== */}
+          {gameMode === 'setup' && (
+            <motion.div
+              key="setup_screen"
+              initial={{ opacity: 0, y: 15 }}
               animate={{ opacity: 1, y: 0 }}
-              className="space-y-4"
+              exit={{ opacity: 0, y: -15 }}
+              className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start max-w-5xl mx-auto w-full"
             >
-              <h2 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider px-2">編輯成員</h2>
-              <div className="space-y-3 px-2">
-                <div className="grid grid-cols-2 gap-2">
-                  <label className="flex items-center gap-2 cursor-pointer group">
-                    <input 
-                      type="checkbox" 
-                      checked={selectedMember.isIndex || false}
-                      onChange={(e) => updateMember({ isIndex: e.target.checked })}
-                      className="w-4 h-4 rounded border-zinc-300 text-indigo-600 focus:ring-indigo-500"
-                    />
-                    <span className="text-[11px] font-medium text-zinc-600 group-hover:text-zinc-900 transition-colors">設為案主</span>
-                  </label>
-                  <label className="flex items-center gap-2 cursor-pointer group">
-                    <input 
-                      type="checkbox" 
-                      checked={selectedMember.isDeceased || false}
-                      onChange={(e) => updateMember({ isDeceased: e.target.checked })}
-                      className="w-4 h-4 rounded border-zinc-300 text-rose-600 focus:ring-rose-500"
-                    />
-                    <span className="text-[11px] font-medium text-zinc-600 group-hover:text-zinc-900 transition-colors">死亡</span>
-                  </label>
-                  <label className="flex items-center gap-2 cursor-pointer group">
-                    <input 
-                      type="checkbox" 
-                      checked={selectedMember.hasDisability || false}
-                      onChange={(e) => updateMember({ hasDisability: e.target.checked })}
-                      className="w-4 h-4 rounded border-zinc-300 text-blue-600 focus:ring-blue-500"
-                    />
-                    <span className="text-[11px] font-medium text-zinc-600 group-hover:text-zinc-900 transition-colors">身障</span>
-                  </label>
-                  <label className="flex items-center gap-2 cursor-pointer group">
-                    <input 
-                      type="checkbox" 
-                      checked={selectedMember.hasChronicDisease || false}
-                      onChange={(e) => updateMember({ hasChronicDisease: e.target.checked })}
-                      className="w-4 h-4 rounded border-zinc-300 text-emerald-600 focus:ring-emerald-500"
-                    />
-                    <span className="text-[11px] font-medium text-zinc-600 group-hover:text-zinc-900 transition-colors">慢性病</span>
-                  </label>
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-[10px] font-bold text-zinc-500 uppercase mb-1">姓名</label>
-                    <input 
-                      type="text" 
-                      value={selectedMember.name}
-                      onChange={(e) => updateMember({ name: e.target.value })}
-                      className="w-full px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-bold text-zinc-500 uppercase mb-1">年齡</label>
-                    <input 
-                      type="text" 
-                      value={selectedMember.age || ''}
-                      onChange={(e) => updateMember({ age: e.target.value })}
-                      placeholder="例: 45"
-                      className="w-full px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all"
-                    />
-                  </div>
-                </div>
-                <div>
-                  <label className="block text-[10px] font-bold text-zinc-500 uppercase mb-1">備註</label>
-                  <textarea 
-                    value={selectedMember.note || ''}
-                    onChange={(e) => updateMember({ note: e.target.value })}
-                    placeholder="填寫備註資訊..."
-                    rows={2}
-                    className="w-full px-3 py-2 bg-zinc-50 border border-zinc-200 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all resize-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[10px] font-bold text-zinc-500 uppercase mb-1">性別</label>
-                  <div className="grid grid-cols-3 gap-2">
-                    <button 
-                      onClick={() => updateMember({ gender: 'male' })}
-                      className={`py-2 rounded-lg text-xs font-medium border transition-all ${selectedMember.gender === 'male' ? 'bg-blue-50 border-blue-500 text-blue-700' : 'bg-white border-zinc-200 text-zinc-600 hover:border-zinc-300'}`}
-                    >
-                      男性
-                    </button>
-                    <button 
-                      onClick={() => updateMember({ gender: 'female' })}
-                      className={`py-2 rounded-lg text-xs font-medium border transition-all ${selectedMember.gender === 'female' ? 'bg-rose-50 border-rose-500 text-rose-700' : 'bg-white border-zinc-200 text-zinc-600 hover:border-zinc-300'}`}
-                    >
-                      女性
-                    </button>
-                    <button 
-                      onClick={() => updateMember({ gender: 'unknown' })}
-                      className={`py-2 rounded-lg text-[10px] font-medium border transition-all ${selectedMember.gender === 'unknown' ? 'bg-emerald-50 border-emerald-500 text-emerald-700' : 'bg-white border-zinc-200 text-zinc-600 hover:border-zinc-300'}`}
-                    >
-                      懷孕/未知
-                    </button>
-                  </div>
-                </div>
-                <div className="pt-2 space-y-2">
-                  <button 
-                    onClick={() => addPartner(selectedMember.id)}
-                    className="w-full flex items-center justify-center gap-2 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-medium hover:bg-indigo-700 transition-all shadow-sm"
-                  >
-                    <Plus className="w-4 h-4" />
-                    新增關係 (配偶/伴侶)
-                  </button>
-
-                  <button 
-                    onClick={() => addSibling(selectedMember.id)}
-                    className="w-full flex items-center justify-center gap-2 py-2.5 bg-emerald-600 text-white rounded-xl text-sm font-medium hover:bg-emerald-700 transition-all shadow-sm"
-                  >
-                    <Plus className="w-4 h-4" />
-                    新增關係 (手足)
-                  </button>
-                  
-                  {!children.some(c => c.memberId === selectedMember.id) && (
-                    <button 
-                      onClick={() => addParents(selectedMember.id)}
-                      className="w-full flex items-center justify-center gap-2 py-2.5 bg-zinc-800 text-white rounded-xl text-sm font-medium hover:bg-zinc-900 transition-all shadow-sm"
-                    >
-                      <Plus className="w-4 h-4" />
-                      新增關係 (父母)
-                    </button>
-                  )}
-                </div>
-                <button 
-                  onClick={() => deleteMember(selectedMember.id)}
-                  className="w-full flex items-center justify-center gap-2 py-2 text-rose-600 text-xs font-medium hover:bg-rose-50 rounded-lg transition-colors mt-2"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                  刪除成員
-                </button>
-              </div>
-            </motion.section>
-          )}
-
-          {selectedUnion && (
-            <motion.section 
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="space-y-4 pt-4 border-t border-zinc-100"
-            >
-              <h2 className="text-xs font-semibold text-zinc-400 uppercase tracking-wider px-2">編輯關係</h2>
-              <div className="space-y-2 px-2">
-                <div className="grid grid-cols-2 gap-2">
-                  <button 
-                    onClick={() => updateUnion(selectedUnion.id, 'marriage')}
-                    className={`flex items-center gap-2 px-3 py-2 rounded-lg text-[11px] font-medium border transition-all ${selectedUnion.type === 'marriage' ? 'bg-indigo-50 border-indigo-500 text-indigo-700' : 'bg-white border-zinc-200'}`}
-                  >
-                    <Link2 className="w-3 h-3" /> 結婚
-                  </button>
-                  <button 
-                    onClick={() => updateUnion(selectedUnion.id, 'cohabitation')}
-                    className={`flex items-center gap-2 px-3 py-2 rounded-lg text-[11px] font-medium border transition-all ${selectedUnion.type === 'cohabitation' ? 'bg-indigo-50 border-indigo-500 text-indigo-700' : 'bg-white border-zinc-200'}`}
-                  >
-                    <Users className="w-3 h-3" /> 同居
-                  </button>
-                  <button 
-                    onClick={() => updateUnion(selectedUnion.id, 'separation')}
-                    className={`flex items-center gap-2 px-3 py-2 rounded-lg text-[11px] font-medium border transition-all ${selectedUnion.type === 'separation' ? 'bg-indigo-50 border-indigo-500 text-indigo-700' : 'bg-white border-zinc-200'}`}
-                  >
-                    <Split className="w-3 h-3" /> 分居
-                  </button>
-                  <button 
-                    onClick={() => updateUnion(selectedUnion.id, 'divorce')}
-                    className={`flex items-center gap-2 px-3 py-2 rounded-lg text-[11px] font-medium border transition-all ${selectedUnion.type === 'divorce' ? 'bg-indigo-50 border-indigo-500 text-indigo-700' : 'bg-white border-zinc-200'}`}
-                  >
-                    <XCircle className="w-3 h-3" /> 離婚
-                  </button>
-                </div>
-                <div className="pt-2 space-y-2">
-                  <div className="grid grid-cols-2 gap-2">
-                    <button 
-                      onClick={() => addMultipleChildren(selectedUnion.id, 1, false)}
-                      className="flex items-center justify-center gap-2 py-2.5 bg-emerald-600 text-white rounded-xl text-sm font-medium hover:bg-emerald-700 transition-all shadow-sm"
-                    >
-                      <Baby className="w-4 h-4" />
-                      新增子女
-                    </button>
-                    <button 
-                      onClick={() => addMultipleChildren(selectedUnion.id, 2, true)}
-                      className="flex items-center justify-center gap-2 py-2.5 bg-teal-600 text-white rounded-xl text-sm font-medium hover:bg-teal-700 transition-all shadow-sm"
-                    >
-                      <Users className="w-4 h-4" />
-                      新增雙胞胎
-                    </button>
-                  </div>
-                  
-                  <div className="p-3 bg-zinc-50 rounded-xl border border-zinc-100 space-y-2">
-                    <p className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">新增多胞胎 (三胞胎以上)</p>
-                    <div className="flex gap-2">
-                      <div className="relative flex-1">
-                        <input 
-                          type="number" 
-                          min="3"
-                          max="10"
-                          value={customBirthCount}
-                          onChange={(e) => setCustomBirthCount(parseInt(e.target.value) || 3)}
-                          className="w-full pl-3 pr-10 py-2 bg-white border border-zinc-200 rounded-lg text-xs focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
-                        />
-                        <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] text-zinc-400 font-medium">胞胎</span>
-                      </div>
-                      <button 
-                        onClick={() => addMultipleChildren(selectedUnion.id, customBirthCount, true)}
-                        className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-xs font-bold hover:bg-indigo-700 transition-all shadow-sm flex items-center gap-1"
-                      >
-                        <Plus className="w-3 h-3" />
-                        新增
-                      </button>
-                    </div>
-                  </div>
-                </div>
-                <button 
-                  onClick={() => deleteUnion(selectedUnion.id)}
-                  className="w-full flex items-center justify-center gap-2 py-2 text-rose-600 text-xs font-medium hover:bg-rose-50 rounded-lg transition-colors mt-2"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                  刪除此關係
-                </button>
-              </div>
-            </motion.section>
-          )}
-        </div>
-
-        <div className="p-4 border-t border-zinc-100 bg-zinc-50/50 space-y-2">
-          <div className="grid grid-cols-2 gap-2">
-            <button 
-              onClick={handleUndo}
-              disabled={history.length === 0}
-              className={`flex items-center justify-center gap-2 py-2 bg-white border rounded-lg text-xs font-medium transition-all ${history.length === 0 ? 'border-zinc-100 text-zinc-300 cursor-not-allowed' : 'border-zinc-200 text-zinc-700 hover:bg-zinc-50'}`}
-            >
-              <Undo2 className="w-3.5 h-3.5" />
-              上一步
-            </button>
-            <button 
-              onClick={centerView}
-              className="flex items-center justify-center gap-2 py-2 bg-white border border-zinc-200 text-zinc-700 rounded-lg text-xs font-medium hover:bg-zinc-50 transition-colors"
-            >
-              <Settings2 className="w-3.5 h-3.5" />
-              置中呈現
-            </button>
-          </div>
-          {!showConfirmReset ? (
-            <button 
-              onClick={() => setShowConfirmReset(true)}
-              className="w-full flex items-center justify-center gap-2 py-2 bg-rose-50 border border-rose-100 text-rose-600 rounded-lg text-xs font-bold hover:bg-rose-100 transition-all"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              重新開始
-            </button>
-          ) : (
-            <div className="flex gap-2">
-              <button 
-                onClick={newFile}
-                className="flex-1 flex items-center justify-center gap-2 py-2 bg-rose-600 text-white rounded-lg text-xs font-bold hover:bg-rose-700 transition-all shadow-sm"
-              >
-                <Check className="w-3.5 h-3.5" />
-                確認清空
-              </button>
-              <button 
-                onClick={() => setShowConfirmReset(false)}
-                className="flex-1 flex items-center justify-center gap-2 py-2 bg-zinc-100 text-zinc-600 rounded-lg text-xs font-medium hover:bg-zinc-200 transition-all"
-              >
-                <X className="w-3.5 h-3.5" />
-                取消
-              </button>
-            </div>
-          )}
-          <div className="flex items-center gap-2 px-2 py-1">
-            <input 
-              type="checkbox" 
-              id="export-bg"
-              checked={exportWithBackground}
-              onChange={(e) => setExportWithBackground(e.target.checked)}
-              className="w-3.5 h-3.5 rounded border-zinc-300 text-zinc-900 focus:ring-zinc-500"
-            />
-            <label htmlFor="export-bg" className="text-[11px] font-medium text-zinc-500 cursor-pointer">匯出時保留白底</label>
-          </div>
-          <button 
-            onClick={exportImage}
-            className="w-full flex items-center justify-center gap-2 py-2.5 bg-zinc-900 text-white rounded-xl text-sm font-medium hover:bg-zinc-800 transition-colors shadow-sm"
-          >
-            <Download className="w-4 h-4" />
-            匯出圖片
-          </button>
-        </div>
-      </div>
-
-        {/* Main Canvas Area */}
-        <div ref={containerRef} className="flex-1 relative canvas-container overflow-hidden">
-          {/* Tool Switcher */}
-          <div className="absolute top-6 left-6 z-10 flex gap-2">
-            <div className="relative">
-              <input 
-                type="file" 
-                id="ai-image-upload" 
-                className="hidden" 
-                accept="image/*"
-                onChange={handleAiRecognize}
-                disabled={isAiParsing}
-              />
-              <label 
-                htmlFor="ai-image-upload"
-                className={`flex items-center gap-2 px-4 py-2 rounded-xl transition-all shadow-lg font-medium border cursor-pointer ${
-                  isAiParsing 
-                    ? 'bg-zinc-50 text-zinc-400 border-zinc-200' 
-                    : 'bg-white text-indigo-600 border-zinc-200 hover:bg-zinc-50 hover:border-indigo-100 hover:shadow-indigo-50'
-                }`}
-                title="AI 圖片辨識掃描"
-              >
-                {isAiParsing ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <ScanLine className="w-4 h-4" />
-                )}
-                <span className="text-xs">{isAiParsing ? '辨識中...' : 'AI 辨識'}</span>
-              </label>
-            </div>
-
-            <button
-              onClick={() => setTool('select')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-xl transition-all shadow-lg font-medium border ${
-                tool === 'select' 
-                  ? 'bg-indigo-600 text-white border-indigo-500 shadow-indigo-100' 
-                  : 'bg-white text-zinc-600 border-zinc-200 hover:bg-zinc-50'
-              }`}
-              title="選取與移動"
-            >
-              <MousePointer2 className="w-4 h-4" />
-              <span className="text-xs">選取模式</span>
-            </button>
-            <button
-              onClick={() => setTool('pen')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-xl transition-all shadow-lg font-medium border ${
-                tool === 'pen' 
-                  ? 'bg-indigo-600 text-white border-indigo-500 shadow-indigo-100' 
-                  : 'bg-white text-zinc-600 border-zinc-200 hover:bg-zinc-50'
-              }`}
-              title="畫筆模式 (圈選同住家人)"
-            >
-              <Pencil className="w-4 h-4" />
-              <span className="text-xs">畫筆模式</span>
-            </button>
-            <button
-              onClick={() => setTool('eraser')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-xl transition-all shadow-lg font-medium border ${
-                tool === 'eraser' 
-                  ? 'bg-indigo-600 text-white border-indigo-500 shadow-indigo-100' 
-                  : 'bg-white text-zinc-600 border-zinc-200 hover:bg-zinc-50'
-              }`}
-              title="橡皮擦模式 (僅擦除手繪線條)"
-            >
-              <Eraser className="w-4 h-4" />
-              <span className="text-xs">橡皮擦</span>
-            </button>
-            {lines.length > 0 && (
-              <button
-                onClick={clearDrawings}
-                className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white text-rose-600 border border-zinc-200 hover:bg-rose-50 transition-all shadow-lg font-medium"
-                title="清除所有繪圖"
-              >
-                <XCircle className="w-4 h-4" />
-                <span className="text-xs">全部清除</span>
-              </button>
-            )}
-          </div>
-
-          {/* Action Toolbar - Right */}
-          <div className="absolute top-6 right-6 z-10 flex flex-col items-end gap-2">
-             <button 
-              onClick={saveChanges}
-              className={`flex items-center gap-2 px-5 py-2.5 rounded-xl font-bold text-sm transition-all shadow-lg border ${
-                hasUnsavedChanges 
-                ? 'bg-indigo-600 text-white border-indigo-500 shadow-indigo-100 hover:bg-indigo-700' 
-                : 'bg-white text-emerald-600 border-zinc-200 shadow-sm'
-              }`}
-            >
-              {lastSavedPulse ? (
-                <>
-                  <Check className="w-4 h-4" />
-                  已儲存
-                </>
-              ) : (
-                <>
-                  <Save className={`w-4 h-4 ${hasUnsavedChanges ? 'animate-pulse' : ''}`} />
-                  {hasUnsavedChanges ? '儲存當前變更' : '資料已儲存'}
-                </>
-              )}
-            </button>
-            {hasUnsavedChanges && (
-              <motion.div 
-                initial={{ opacity: 0, x: 20 }}
-                animate={{ opacity: 1, x: 0 }}
-                className="bg-amber-50 border border-amber-100 px-3 py-1.5 rounded-lg shadow-sm flex items-center gap-1.5"
-              >
-                <span className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-pulse" />
-                <span className="text-[10px] text-amber-600 font-bold uppercase tracking-tight">尚未儲存變更</span>
-              </motion.div>
-            )}
-          </div>
-
-          {/* Zoom Controls */}
-        <div className="absolute bottom-6 right-6 z-10 flex flex-col gap-2">
-          <button 
-            onClick={() => {
-              const newScale = Math.min(5, scale * 1.2);
-              setScale(newScale);
-            }}
-            className="p-3 bg-white border border-zinc-200 rounded-xl shadow-lg text-zinc-600 hover:text-indigo-600 hover:border-indigo-100 transition-all"
-            title="放大"
-          >
-            <ZoomIn className="w-5 h-5" />
-          </button>
-          <button 
-            onClick={() => {
-              const newScale = Math.max(0.1, scale / 1.2);
-              setScale(newScale);
-            }}
-            className="p-3 bg-white border border-zinc-200 rounded-xl shadow-lg text-zinc-600 hover:text-indigo-600 hover:border-indigo-100 transition-all"
-            title="縮小"
-          >
-            <ZoomOut className="w-5 h-5" />
-          </button>
-          <button 
-            onClick={centerView}
-            className="p-3 bg-white border border-zinc-200 rounded-xl shadow-lg text-zinc-600 hover:text-indigo-600 hover:border-indigo-100 transition-all"
-            title="置中呈現"
-          >
-            <Maximize className="w-5 h-5" />
-          </button>
-        </div>
-
-        {members.length === 0 && (
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-            <div className="text-center opacity-20">
-              <Users className="w-24 h-24 mx-auto mb-4" />
-              <p className="text-xl font-bold">請從側邊欄新增案主</p>
-            </div>
-          </div>
-        )}
-        <Stage 
-          width={dimensions.width} 
-          height={dimensions.height}
-          ref={stageRef}
-          draggable={tool === 'select'}
-          scaleX={scale}
-          scaleY={scale}
-          x={position.x}
-          y={position.y}
-          onWheel={handleWheel}
-          onMouseDown={handleMouseDown}
-          onMouseMove={handleMouseMove}
-          onMouseUp={handleMouseUp}
-          onMouseLeave={() => setCursorPos(null)}
-          onTouchStart={handleMouseDown}
-          onTouchMove={handleMouseMove}
-          onTouchEnd={handleMouseUp}
-        >
-          <Layer listening={tool === 'select'}>
-            {/* Unions (Lines) */}
-            {unions.map(union => {
-              const p1 = members.find(m => m.id === union.partnerAId);
-              const p2 = members.find(m => m.id === union.partnerBId);
-              if (!p1 || !p2) return null;
-
-              const midX = (p1.x + p2.x) / 2;
-              const midY = (p1.y + p2.y) / 2;
-
-              return (
-                <Group key={union.id}>
-                  {/* Hit Area - Wider invisible line for easier clicking */}
-                  <Line
-                    points={[p1.x, p1.y, p2.x, p2.y]}
-                    stroke="transparent"
-                    strokeWidth={20}
-                    onClick={() => {
-                      setSelectedUnionId(union.id);
-                      setSelectedId(null);
-                    }}
-                    onTap={() => {
-                      setSelectedUnionId(union.id);
-                      setSelectedId(null);
-                    }}
-                  />
-                  <Line
-                    points={[p1.x, p1.y, p2.x, p2.y]}
-                    stroke={selectedUnionId === union.id ? '#4f46e5' : '#71717a'}
-                    strokeWidth={selectedUnionId === union.id ? 4 : 2}
-                    dash={union.type === 'cohabitation' ? [5, 5] : []}
-                    listening={false} // Let the hit area handle events
-                  />
-                  {/* Divorce / Separation markers */}
-                  {(union.type === 'divorce' || union.type === 'separation') && (
-                    <Line
-                      points={[midX - 10, midY - 10, midX + 10, midY + 10]}
-                      stroke={selectedUnionId === union.id ? '#4f46e5' : '#71717a'}
-                      strokeWidth={2}
-                      listening={false}
-                    />
-                  )}
-                  {union.type === 'divorce' && (
-                    <Line
-                      points={[midX - 5, midY - 10, midX + 15, midY + 10]}
-                      stroke={selectedUnionId === union.id ? '#4f46e5' : '#71717a'}
-                      strokeWidth={2}
-                      listening={false}
-                    />
-                  )}
-                </Group>
-              );
-            })}
-
-            {/* Children (Lines) */}
-            {unions.map(union => {
-              const unionChildren = children.filter(c => c.unionId === union.id);
-              if (unionChildren.length === 0) return null;
-
-              const p1 = members.find(m => m.id === union.partnerAId);
-              const p2 = members.find(m => m.id === union.partnerBId);
-              if (!p1 || !p2) return null;
-
-              const parentMidX = (p1.x + p2.x) / 2;
-              const parentMidY = (p1.y + p2.y) / 2;
-              
-              const childMembers = unionChildren
-                .map(c => members.find(m => m.id === c.memberId))
-                .filter((m): m is Member => !!m);
-
-              if (childMembers.length === 0) return null;
-
-              // Standard Sibling Bar Logic
-              const barY = childMembers[0].y - 80;
-
-              // Group children by multipleBirthId (for twins/triplets)
-              const groups: Record<string, Member[]> = {};
-              const singles: Member[] = [];
-
-              unionChildren.forEach(rel => {
-                const member = members.find(m => m.id === rel.memberId);
-                if (!member) return;
-                if (rel.multipleBirthId) {
-                  if (!groups[rel.multipleBirthId]) groups[rel.multipleBirthId] = [];
-                  groups[rel.multipleBirthId].push(member);
-                } else {
-                  singles.push(member);
-                }
-              });
-
-              const groupList = Object.entries(groups);
-              
-              // Calculate the span of the horizontal bar
-              // For twins/triplets, we use the meeting point, not the individual member positions
-              const barPoints: number[] = [parentMidX];
-              singles.forEach(m => barPoints.push(m.x));
-              groupList.forEach(([_, groupMembers]) => {
-                const meetingX = (groupMembers.reduce((sum, m) => sum + m.x, 0) / groupMembers.length);
-                barPoints.push(meetingX);
-              });
-
-              const barMinX = Math.min(...barPoints);
-              const barMaxX = Math.max(...barPoints);
-
-              return (
-                <Group key={`children-group-${union.id}`}>
-                  {/* 1. Vertical line from parents midpoint down to the bar level */}
-                  <Line
-                    points={[parentMidX, parentMidY, parentMidX, barY]}
-                    stroke="#71717a"
-                    strokeWidth={2}
-                  />
-                  
-                  {/* 2. Horizontal sibling bar */}
-                  <Line
-                    points={[barMinX, barY, barMaxX, barY]}
-                    stroke="#71717a"
-                    strokeWidth={2}
-                  />
-                  
-                  {/* 3. Vertical lines down to single children */}
-                  {singles.map(child => (
-                    <Line
-                      key={`to-child-${child.id}`}
-                      points={[child.x, barY, child.x, child.y]}
-                      stroke="#71717a"
-                      strokeWidth={2}
-                    />
-                  ))}
-
-                  {/* 4. Multiple Birth Groups (Twins/Triplets) - Diagonal lines from bar to children */}
-                  {groupList.map(([groupId, groupMembers]) => {
-                    const meetingX = (groupMembers.reduce((sum, m) => sum + m.x, 0) / groupMembers.length);
-                    return (
-                      <Group key={`group-${groupId}`}>
-                        {/* Vertical from bar to meeting point (if needed) or just diagonals */}
-                        {groupMembers.map(m => (
-                          <Line
-                            key={`to-twin-${m.id}`}
-                            points={[meetingX, barY, m.x, m.y]}
-                            stroke="#71717a"
-                            strokeWidth={2}
-                          />
-                        ))}
-                      </Group>
-                    );
-                  })}
-                </Group>
-              );
-            })}
-
-            {/* Members */}
-            {members.map(member => (
-              <Group
-                key={member.id}
-                x={member.x}
-                y={member.y}
-                draggable
-                onDragEnd={(e) => handleDragEnd(member.id, e)}
-                onClick={() => {
-                  setSelectedId(member.id);
-                  setSelectedUnionId(null);
-                }}
-                onTap={() => {
-                  setSelectedId(member.id);
-                  setSelectedUnionId(null);
-                }}
-              >
-                {member.gender === 'male' ? (
-                  <Group>
-                    <Rect
-                      width={MEMBER_SIZE}
-                      height={MEMBER_SIZE}
-                      offsetX={MEMBER_SIZE / 2}
-                      offsetY={MEMBER_SIZE / 2}
-                      fill={member.isIndex ? (selectedId === member.id ? '#94a3b8' : '#cbd5e1') : (selectedId === member.id ? '#f1f5f9' : 'white')}
-                      stroke={selectedId === member.id ? '#3b82f6' : '#94a3b8'}
-                      strokeWidth={selectedId === member.id ? 3 : 2}
-                      cornerRadius={4}
-                      shadowBlur={selectedId === member.id ? 10 : 0}
-                      shadowColor="#3b82f6"
-                    />
-                    {/* Disability: Right half filled */}
-                    {member.hasDisability && (
-                      <Rect
-                        width={MEMBER_SIZE / 2}
-                        height={MEMBER_SIZE}
-                        offsetX={0}
-                        offsetY={MEMBER_SIZE / 2}
-                        fill={member.isIndex ? "#475569" : "#94a3b8"}
-                        cornerRadius={[0, 4, 4, 0]}
-                      />
-                    )}
-                    {/* Chronic Disease: Bottom right quarter filled */}
-                    {member.hasChronicDisease && (
-                      <Rect
-                        width={MEMBER_SIZE / 2}
-                        height={MEMBER_SIZE / 2}
-                        offsetX={0}
-                        offsetY={0}
-                        fill={member.isIndex ? "#475569" : "#94a3b8"}
-                        cornerRadius={[0, 0, 4, 0]}
-                      />
-                    )}
-                    {/* Deceased: X mark */}
-                    {member.isDeceased && (
-                      <Group>
-                        <Line
-                          points={[-MEMBER_SIZE / 2, -MEMBER_SIZE / 2, MEMBER_SIZE / 2, MEMBER_SIZE / 2]}
-                          stroke="#475569"
-                          strokeWidth={3}
-                        />
-                        <Line
-                          points={[MEMBER_SIZE / 2, -MEMBER_SIZE / 2, -MEMBER_SIZE / 2, MEMBER_SIZE / 2]}
-                          stroke="#475569"
-                          strokeWidth={3}
-                        />
-                      </Group>
-                    )}
-                  </Group>
-                ) : member.gender === 'female' ? (
-                  <Group>
-                    <Circle
-                      radius={MEMBER_SIZE / 2}
-                      fill={member.isIndex ? (selectedId === member.id ? '#94a3b8' : '#cbd5e1') : (selectedId === member.id ? '#f1f5f9' : 'white')}
-                      stroke={selectedId === member.id ? '#e11d48' : '#94a3b8'}
-                      strokeWidth={selectedId === member.id ? 3 : 2}
-                      shadowBlur={selectedId === member.id ? 10 : 0}
-                      shadowColor="#e11d48"
-                    />
-                    {/* Disability: Right half filled */}
-                    {member.hasDisability && (
-                      <Group clipFunc={(ctx) => {
-                        ctx.rect(0, -MEMBER_SIZE / 2, MEMBER_SIZE / 2, MEMBER_SIZE);
-                      }}>
-                        <Circle
-                          radius={MEMBER_SIZE / 2}
-                          fill={member.isIndex ? "#475569" : "#94a3b8"}
-                        />
-                      </Group>
-                    )}
-                    {/* Chronic Disease: Bottom right quarter filled */}
-                    {member.hasChronicDisease && (
-                      <Group clipFunc={(ctx) => {
-                        ctx.rect(0, 0, MEMBER_SIZE / 2, MEMBER_SIZE / 2);
-                      }}>
-                        <Circle
-                          radius={MEMBER_SIZE / 2}
-                          fill={member.isIndex ? "#475569" : "#94a3b8"}
-                        />
-                      </Group>
-                    )}
-                    {/* Deceased: X mark */}
-                    {member.isDeceased && (
-                      <Group>
-                        <Line
-                          points={[-MEMBER_SIZE / 2.8, -MEMBER_SIZE / 2.8, MEMBER_SIZE / 2.8, MEMBER_SIZE / 2.8]}
-                          stroke="#475569"
-                          strokeWidth={3}
-                        />
-                        <Line
-                          points={[MEMBER_SIZE / 2.8, -MEMBER_SIZE / 2.8, -MEMBER_SIZE / 2.8, MEMBER_SIZE / 2.8]}
-                          stroke="#475569"
-                          strokeWidth={3}
-                        />
-                      </Group>
-                    )}
-                  </Group>
-                ) : (
-                  <Group>
-                    <RegularPolygon
-                      sides={3}
-                      radius={MEMBER_SIZE / 1.5}
-                      rotation={0}
-                      fill={member.isIndex ? (selectedId === member.id ? '#94a3b8' : '#cbd5e1') : (selectedId === member.id ? '#f1f5f9' : 'white')}
-                      stroke={selectedId === member.id ? '#10b981' : '#94a3b8'}
-                      strokeWidth={selectedId === member.id ? 3 : 2}
-                      shadowBlur={selectedId === member.id ? 10 : 0}
-                      shadowColor="#10b981"
-                      offsetY={MEMBER_SIZE / 10}
-                    />
-                    {/* Disability: Right half filled */}
-                    {member.hasDisability && (
-                      <Group clipFunc={(ctx) => {
-                        ctx.rect(0, -MEMBER_SIZE, MEMBER_SIZE, MEMBER_SIZE * 2);
-                      }}>
-                        <RegularPolygon
-                          sides={3}
-                          radius={MEMBER_SIZE / 1.5}
-                          rotation={0}
-                          fill={member.isIndex ? "#475569" : "#94a3b8"}
-                          offsetY={MEMBER_SIZE / 10}
-                        />
-                      </Group>
-                    )}
-                    {/* Chronic Disease: Bottom right quarter filled */}
-                    {member.hasChronicDisease && (
-                      <Group clipFunc={(ctx) => {
-                        ctx.rect(0, 0, MEMBER_SIZE, MEMBER_SIZE);
-                      }}>
-                        <RegularPolygon
-                          sides={3}
-                          radius={MEMBER_SIZE / 1.5}
-                          rotation={0}
-                          fill={member.isIndex ? "#475569" : "#94a3b8"}
-                          offsetY={MEMBER_SIZE / 10}
-                        />
-                      </Group>
-                    )}
-                    {/* Deceased: X mark */}
-                    {member.isDeceased && (
-                      <Group offsetY={MEMBER_SIZE / 10}>
-                        <Line
-                          points={[-MEMBER_SIZE / 3, -MEMBER_SIZE / 6, MEMBER_SIZE / 3, MEMBER_SIZE / 2]}
-                          stroke="#475569"
-                          strokeWidth={3}
-                        />
-                        <Line
-                          points={[MEMBER_SIZE / 3, -MEMBER_SIZE / 6, -MEMBER_SIZE / 3, MEMBER_SIZE / 2]}
-                          stroke="#475569"
-                          strokeWidth={3}
-                        />
-                      </Group>
-                    )}
-                  </Group>
-                )}
+              {/* Option Selector Canvas */}
+              <div id="selector_card" className="lg:col-span-7 bg-white p-6 sm:p-8 rounded-3xl border border-stone-200/80 shadow-xl shadow-stone-100/40 relative overflow-hidden flex flex-col gap-6">
+                <div className="absolute top-0 left-0 right-0 h-1.5 bg-gradient-to-r from-amber-400 via-amber-500 to-emerald-500" />
                 
-                <Text
-                  text={member.name}
-                  fontSize={12}
-                  fontFamily="Inter"
-                  fontStyle="bold"
-                  fill="#18181b"
-                  align="center"
-                  width={MEMBER_SIZE * 2}
-                  offsetX={MEMBER_SIZE}
-                  y={MEMBER_SIZE / 2 + 10}
-                />
-                {member.age && (
-                  <Text
-                    text={member.age}
-                    fontSize={20}
-                    fontFamily="Inter"
-                    fontStyle="bold"
-                    fill={member.isDeceased ? "#475569" : "#1e293b"}
-                    align="center"
-                    verticalAlign="middle"
-                    width={MEMBER_SIZE}
-                    height={MEMBER_SIZE}
-                    offsetX={MEMBER_SIZE / 2}
-                    offsetY={MEMBER_SIZE / 2}
-                  />
-                )}
-                {member.note && (
-                  <Text
-                    text={member.note}
-                    fontSize={18}
-                    fontFamily="Inter"
-                    fill="#000000"
-                    fontStyle="bold"
-                    align="center"
-                    width={MEMBER_SIZE * 3}
-                    offsetX={MEMBER_SIZE * 1.5}
-                    y={MEMBER_SIZE / 2 + 30}
-                  />
-                )}
-              </Group>
-            ))}
-          </Layer>
-          <Layer listening={tool !== 'select'}>
-            {/* Drawings */}
-            {lines.map((line, i) => (
-              <Line
-                key={i}
-                points={line.points}
-                stroke={line.color}
-                strokeWidth={line.isEraser ? 30 : 3}
-                tension={0.5}
-                lineCap="round"
-                lineJoin="round"
-                opacity={line.isEraser ? 1 : 0.6}
-                globalCompositeOperation={line.isEraser ? 'destination-out' : 'source-over'}
-              />
-            ))}
-            {/* Eraser Cursor Feedback */}
-            {tool === 'eraser' && cursorPos && (
-              <Circle
-                x={cursorPos.x}
-                y={cursorPos.y}
-                radius={15}
-                stroke="#71717a"
-                strokeWidth={1}
-                dash={[4, 4]}
-                listening={false}
-              />
-            )}
-          </Layer>
-        </Stage>
-      </div>
-    </div>
-
-      {/* Project Management Modal */}
-      <AnimatePresence>
-        {isProjectModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 text-zinc-900">
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setIsProjectModalOpen(false)}
-              className="absolute inset-0 bg-black/40 backdrop-blur-sm"
-            />
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.95, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="relative w-full max-w-lg bg-white rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[80vh]"
-            >
-              <div className="p-6 border-b border-zinc-100 flex items-center justify-between bg-zinc-50/50">
                 <div>
-                  <h2 className="text-xl font-bold text-zinc-900">家庭管理中心</h2>
-                  <p className="text-xs text-zinc-500 mt-1">在這裡管理您的所有家系圖家庭</p>
-                </div>
-                <button 
-                  onClick={() => setIsProjectModalOpen(false)}
-                  className="p-2 hover:bg-zinc-200 rounded-full transition-colors"
-                >
-                  <X className="w-5 h-5 text-zinc-400" />
-                </button>
-              </div>
-
-              <div className="p-6 overflow-y-auto flex-1 space-y-8">
-                {/* Draft Option */}
-                <div 
-                  onClick={switchToDraft}
-                  className={`group flex items-center gap-4 p-4 rounded-2xl border transition-all cursor-pointer ${
-                    !activeProjectId 
-                      ? 'bg-amber-50 border-amber-200 ring-1 ring-amber-200 shadow-sm' 
-                      : 'bg-zinc-50 border-zinc-200 hover:border-zinc-300'
-                  }`}
-                >
-                  <div className={`p-3 rounded-xl transition-colors ${!activeProjectId ? 'bg-amber-500 text-white shadow-md shadow-amber-100' : 'bg-white text-zinc-400'}`}>
-                    <Pencil className="w-5 h-5" />
-                  </div>
-                  <div className="flex-1">
-                    <h4 className="font-bold text-zinc-900">隨意繪製 (我的草案)</h4>
-                    <p className="text-xs text-zinc-500 mt-0.5">適合臨時繪製，不會儲存為正式家庭</p>
-                  </div>
-                  {!activeProjectId && (
-                    <div className="text-amber-600 pr-1">
-                      <Check className="w-5 h-5" />
-                    </div>
-                  )}
+                  <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
+                    <BookOpen className="w-5 h-5 text-amber-500" />
+                    選擇打字練習模式
+                  </h2>
+                  <p className="text-xs text-slate-400 mt-1">
+                    輸入自訂長文短句，或利用 AI 聯網自動產出主題生字。
+                  </p>
                 </div>
 
-                {/* New Project Input */}
-                <div className="space-y-3 bg-zinc-50 p-4 rounded-2xl border border-zinc-100">
-                  <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest px-1">建立家庭</label>
-                  <div className="flex gap-2">
-                    <input 
-                      type="text" 
-                      value={newProjectName}
-                      onChange={(e) => setNewProjectName(e.target.value)}
-                      placeholder="例如：王小明家庭、2024個案A..."
-                      className="flex-1 px-4 py-2.5 bg-white border border-zinc-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
-                      onKeyDown={(e) => e.key === 'Enter' && createNewProject(newProjectName)}
-                    />
-                    <button 
-                      onClick={() => createNewProject(newProjectName)}
-                      className="px-5 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-bold shadow-lg shadow-indigo-100 hover:bg-indigo-700 transition-all flex items-center gap-2"
+                 {/* Primary Textbook Tabs */}
+                <div className="grid grid-cols-3 gap-1.5 bg-stone-100 p-1.5 rounded-2xl border border-stone-200/50">
+                  {(['自訂題目', 'AI 主題產生', '1v1 PK 對戰'] as TextbookVersion[]).map((tab) => (
+                    <button
+                      key={tab}
+                      onClick={() => {
+                        setTextbook(tab);
+                        setPkLobbyError('');
+                      }}
+                      className={`py-2.5 px-2 text-xs font-bold rounded-xl transition-all cursor-pointer text-center ${
+                        textbook === tab 
+                          ? 'bg-amber-500 text-white shadow-md shadow-amber-500/10 font-extrabold scale-102' 
+                          : 'text-slate-600 hover:text-slate-800 hover:bg-stone-200/50'
+                      }`}
                     >
-                      <Plus className="w-4 h-4" />
-                      建立
+                      {tab === '1v1 PK 對戰' ? '🎮 1v1 PK 對戰' : tab}
                     </button>
-                  </div>
+                  ))}
                 </div>
 
-                {/* Project List */}
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between px-1">
-                    <label className="text-[10px] font-bold text-zinc-400 uppercase tracking-widest">已儲存的家庭 ({projects.length})</label>
-                    {projects.length > 0 && <span className="text-[10px] text-zinc-400">點擊切換項目</span>}
+                {/* Custom input Segment */}
+                {textbook === '自訂題目' && (
+                  <div className="flex flex-col gap-3">
+                    <div className="flex flex-col gap-1.5">
+                      <label className="text-xs font-bold text-slate-500">貼上自訂中文文章（系統將自動把每個中文字轉成對應注音打字考題）</label>
+                      <textarea
+                        value={customText}
+                        onChange={(e) => setCustomText(e.target.value)}
+                        rows={4}
+                        placeholder="在此貼上您要練習的國語課文、詩詞或任意中文字句，如：床前明月光..."
+                        className="w-full bg-stone-50 border border-stone-200 rounded-2xl p-4 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20 leading-relaxed font-sans placeholder-slate-400"
+                        maxLength={500}
+                      />
+                      <span className="text-right text-[10px] text-slate-400">限制 500 字以內 | 支援離線注音資料庫分析</span>
+                    </div>
                   </div>
-                  
-                  <div className="grid gap-3 pb-4">
-                    {projects.length === 0 ? (
-                      <div className="py-12 text-center border-2 border-dashed border-zinc-100 rounded-3xl bg-zinc-50/30">
-                        <FolderOpen className="w-12 h-12 text-zinc-200 mx-auto mb-3" />
-                        <p className="text-sm text-zinc-400 font-medium">目前還沒有儲存的家庭</p>
-                        <p className="text-[10px] text-zinc-300 mt-1">上面輸入名稱來建立新的家系圖</p>
+                )}
+
+                {/* AI Theme Topic Generator */}
+                {textbook === 'AI 主題產生' && (
+                  <div className="flex flex-col gap-3">
+                    <div className="flex flex-col gap-1.5">
+                      <label className="text-xs font-bold text-slate-500">自訂 AI 發想主題（點選後，聯網 Gemini 將自動產出主題生詞字典）</label>
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          value={aiTopic}
+                          onChange={(e) => setAiTopic(e.target.value)}
+                          placeholder="例如：熱帶雨林、太空探險、海底動物、美味便當..."
+                          className="flex-1 bg-stone-50 border border-stone-200 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500/20"
+                          maxLength={30}
+                        />
                       </div>
-                    ) : (
-                      [...projects].sort((a, b) => b.updatedAt - a.updatedAt).map(project => (
-                        <div 
-                          key={project.id}
-                          className={`group flex items-center gap-4 p-4 rounded-2xl border transition-all relative ${
-                            activeProjectId === project.id 
-                              ? 'bg-indigo-50 border-indigo-200 ring-1 ring-indigo-200 shadow-sm' 
-                              : 'bg-white border-zinc-100 hover:border-zinc-300 hover:shadow-md'
-                          }`}
-                        >
-                          <div 
-                            className="flex flex-1 items-center gap-4 cursor-pointer min-w-0"
-                            onClick={() => loadProject(project.id)}
+                      <p className="text-[11px] text-slate-400 leading-relaxed">
+                        系統將使用 <b>Gemini AI</b> 模型幫您自動擬定學童生字難度，並配對正確聲調，極具趣味性！
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* 1v1 PK Arena Setup Controls */}
+                {textbook === '1v1 PK 對戰' && (
+                  <div className="flex flex-col gap-4 bg-orange-50/20 p-5 rounded-2xl border border-orange-200/50">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-black text-amber-800 flex items-center gap-1.5 uppercase tracking-wider">
+                        ⚔️ 雙人注音拼字對抗擂台
+                      </span>
+                      <div className="flex bg-stone-200 p-0.5 rounded-lg shrink-0">
+                        {(['host', 'join'] as const).map((role) => (
+                          <button
+                            key={role}
+                            type="button"
+                            onClick={() => {
+                              setPkRole(role);
+                              setPkLobbyError('');
+                            }}
+                            className={`px-2.5 py-1 text-[10px] font-black rounded-md transition-all cursor-pointer ${
+                              pkRole === role
+                                ? 'bg-amber-500 text-white shadow-sm'
+                                : 'text-slate-600 hover:text-slate-850'
+                            }`}
                           >
-                            <div className={`p-3 rounded-xl transition-colors ${activeProjectId === project.id ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-200/50' : 'bg-white border border-zinc-100 text-zinc-300 group-hover:text-indigo-400 group-hover:border-indigo-100'}`}>
-                              <FolderOpen className="w-5 h-5" />
-                            </div>
-                            <div className="flex-1 min-w-0">
-                              <h4 className={`font-bold truncate flex items-center gap-2 ${activeProjectId === project.id ? 'text-indigo-900' : 'text-zinc-900'}`}>
-                                {project.name}
-                                {activeProjectId === project.id && <span className="bg-indigo-600 text-white text-[8px] px-1.5 py-0.5 rounded font-black tracking-tighter">正在編輯</span>}
-                              </h4>
-                              <p className="text-[10px] text-zinc-400 mt-1 flex items-center gap-1 font-medium">
-                                <RotateCcw className="w-3 h-3" />
-                                更新於: {new Date(project.updatedAt).toLocaleString()}
-                              </p>
-                            </div>
+                            {role === 'host' ? '開對抗房' : '加入對抗'}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {pkLobbyError && (
+                      <div className="p-3 bg-red-50 text-red-800 border border-red-200/50 text-xs font-bold rounded-xl flex items-center gap-1.5 animate-pulse">
+                        <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+                        <span>{pkLobbyError}</span>
+                      </div>
+                    )}
+
+                    {isPkPolling && pkRoomState ? (
+                      <div className="bg-amber-50 border border-amber-350/60 p-4 rounded-xl flex flex-col items-center justify-center gap-3.5 text-center animate-pulse">
+                        <div className="w-8 h-8 border-3 border-amber-500 border-t-amber-800 rounded-full animate-spin" />
+                        <div>
+                          <div className="text-sm font-black text-amber-950">
+                            已成功登錄房號：【{pkRoomState.roomCode}】
                           </div>
-                          
-                          <div className="flex gap-1.5 items-center">
-                            <button 
-                              type="button"
-                              onClick={() => {
-                                const newName = window.prompt('重新命名家庭', project.name);
-                                if (newName) renameProject(project.id, newName);
-                              }}
-                              className="p-2 text-zinc-400 hover:text-indigo-600 hover:bg-white border border-transparent hover:border-indigo-100 rounded-xl transition-all shadow-none hover:shadow-sm"
-                              title="重新命名"
-                            >
-                              <Edit3 className="w-4 h-4" />
-                            </button>
-                            <button 
-                              type="button"
-                              onClick={() => setProjectToDelete(project.id)}
-                              className="p-2 text-zinc-400 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-100 rounded-xl transition-all shadow-none hover:shadow-sm"
-                              title="刪除"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
+                          <div className="text-xs text-amber-700 font-medium mt-1">
+                            {pkRole === 'host' 
+                              ? '請分享此代碼讓另一台電腦「加入房間」，對方進入後將立刻同步開賽！' 
+                              : '對方正在連線中，兩台電腦已自動配對相同題目...'}
                           </div>
                         </div>
-                      ))
+
+                        <div className="w-full border-t border-amber-200 pt-2 flex flex-col gap-1.5 text-left">
+                          <span className="text-[10px] text-amber-850 font-black uppercase tracking-wider">房內玩家連線清單：</span>
+                          {Object.values(pkRoomState.players).map((p: any) => (
+                            <div key={p.username} className="text-xs text-amber-900 font-bold flex items-center gap-1.5 pl-1">
+                              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping shrink-0" />
+                              <span>🧑‍💻 {p.username} {p.username === pkUsername ? '(你)' : '(對手已就位)'} 已連線</span>
+                            </div>
+                          ))}
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsPkPolling(false);
+                            setPkRoomState(null);
+                          }}
+                          className="px-4 py-1.5 bg-stone-200 hover:bg-stone-300 text-stone-700 text-xs font-bold rounded-lg transition-all cursor-pointer"
+                        >
+                          取消等待
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col gap-3">
+                        <div className="grid grid-cols-2 gap-3">
+                          <div className="flex flex-col gap-1">
+                            <label className="text-[10px] font-bold text-slate-500">我的玩家暱稱</label>
+                            <input
+                              type="text"
+                              maxLength={12}
+                              value={pkUsername}
+                              onChange={(e) => setPkUsername(e.target.value)}
+                              placeholder="例如：小華"
+                              className="bg-stone-50 border border-stone-200 rounded-xl px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-amber-500/20"
+                            />
+                          </div>
+                          <div className="flex flex-col gap-1">
+                            <label className="text-[10px] font-bold text-slate-500">房間密碼代碼</label>
+                            <input
+                              type="text"
+                              maxLength={10}
+                              value={pkRoomCode}
+                              onChange={(e) => setPkRoomCode(e.target.value)}
+                              placeholder="例如：8888"
+                              className="bg-stone-50 border border-stone-200 rounded-xl px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-amber-500/20"
+                            />
+                          </div>
+                        </div>
+
+                        {pkRole === 'host' ? (
+                          <div className="flex flex-col gap-3">
+                            {/* Question Source Chooser inside PK setup */}
+                            <div className="border border-amber-200/50 bg-amber-50/35 p-3 rounded-xl flex flex-col gap-2.5">
+                              <span className="text-[10px] font-bold text-amber-950 flex items-center gap-1">
+                                🎯 請設定本次 PK 對戰的題目來源：
+                              </span>
+                              <div className="grid grid-cols-2 gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setPkQuestionSource('custom')}
+                                  className={`py-1.5 px-1 text-xs font-bold rounded-lg transition-all border cursor-pointer text-center ${
+                                    pkQuestionSource === 'custom'
+                                      ? 'bg-amber-500 border-amber-500 text-white font-extrabold shadow-sm'
+                                      : 'bg-white border-stone-200 text-slate-600 hover:bg-stone-50'
+                                  }`}
+                                >
+                                  ✍️ 房長自訂字句
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setPkQuestionSource('ai')}
+                                  className={`py-1.5 px-1 text-xs font-bold rounded-lg transition-all border cursor-pointer text-center ${
+                                    pkQuestionSource === 'ai'
+                                      ? 'bg-amber-500 border-amber-500 text-white font-extrabold shadow-sm'
+                                      : 'bg-white border-stone-200 text-slate-600 hover:bg-stone-50'
+                                  }`}
+                                >
+                                  🤖 AI 主題產生考題
+                                </button>
+                              </div>
+
+                              {pkQuestionSource === 'custom' ? (
+                                <div className="flex flex-col gap-1 text-left mt-0.5">
+                                  <label className="text-[10px] font-bold text-slate-500">輸入 PK 自訂中文文章（自動轉為注音）</label>
+                                  <textarea
+                                    value={pkCustomText}
+                                    onChange={(e) => setPkCustomText(e.target.value)}
+                                    rows={2}
+                                    placeholder="例如：極速注音拼字王擂台，大家準備好了嗎？"
+                                    className="w-full bg-white border border-stone-200 rounded-xl p-2 text-[11px] focus:outline-none focus:ring-1 focus:ring-amber-500/20 leading-relaxed font-sans text-slate-800 placeholder-slate-400"
+                                    maxLength={150}
+                                  />
+                                </div>
+                              ) : (
+                                <div className="flex flex-col gap-1 text-left mt-0.5">
+                                  <label className="text-[10px] font-bold text-slate-500">輸入 AI 主題發想關鍵字</label>
+                                  <input
+                                    type="text"
+                                    value={pkAiTopic}
+                                    onChange={(e) => setPkAiTopic(e.target.value)}
+                                    placeholder="例如：動物園、魔法世界、恐龍探險、水果拼圖..."
+                                    className="w-full bg-white border border-stone-200 rounded-xl px-2.5 py-1.5 text-[11px] focus:outline-none focus:ring-1 focus:ring-amber-500/20 text-slate-800"
+                                    maxLength={20}
+                                  />
+                                </div>
+                              )}
+                            </div>
+                            <div className="text-[10px] text-amber-700 leading-normal font-medium bg-amber-50/50 p-3 rounded-xl border border-amber-205/40">
+                              💡 <b>房長溫馨提示：</b>您設定的詞彙清單將會在兩台電腦同步下載，題目完全一致，保證 PK 絕對的公平！
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="text-[10px] text-slate-500 leading-normal font-medium bg-slate-50 p-3 rounded-xl border border-slate-200/40">
+                            🤝 <b>對手溫馨提示：</b>加入房號後，系統會自動在房長那端拉取預設題目和總時限，並同步進入拼字大賽畫面！
+                          </div>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={pkRole === 'host' ? handleCreatePkRoom : handleJoinPkRoom}
+                          disabled={pkLoading}
+                          className={`w-full py-2.5 rounded-xl font-black text-xs active:scale-95 transition-all text-center flex items-center justify-center gap-1.5 cursor-pointer shadow-sm ${
+                            pkRole === 'host'
+                              ? 'bg-amber-500 hover:bg-amber-600 text-white shadow-amber-500/15'
+                              : 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-600/15'
+                          }`}
+                        >
+                          {pkLoading ? (
+                            <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                          ) : pkRole === 'host' ? (
+                            <span>建立並等待對手加入</span>
+                          ) : (
+                            <span>輸入密碼加入對戰</span>
+                          )}
+                        </button>
+                      </div>
                     )}
                   </div>
+                )}
+
+                {/* Play Mode Selector Area */}
+                <div className="border-t border-stone-100 pt-4 flex flex-col gap-2.5">
+                  <span className="text-xs font-bold text-slate-500 flex items-center gap-1.5">
+                    <Sparkles className="w-4 h-4 text-amber-500 animate-spin" />
+                    遊戲挑戰模式選擇
+                  </span>
+                  
+                  <div className="grid grid-cols-2 gap-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPlayModeType('normal');
+                      }}
+                      className={`p-3.5 rounded-2xl flex flex-col gap-1 items-start text-left border transition-all cursor-pointer ${
+                        playModeType === 'normal'
+                          ? 'bg-amber-50/50 border-amber-300 text-amber-950 ring-2 ring-amber-400/25 font-bold'
+                          : 'bg-white border-stone-200 text-slate-600 hover:bg-stone-50'
+                      }`}
+                    >
+                      <span className="text-xs font-black flex items-center gap-1">
+                        🏆 闖關挑戰模式
+                      </span>
+                      <span className="text-[10px] text-slate-400 leading-relaxed">
+                        打完指定數量題目，即完成挑戰。適合平時練習。
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPlayModeType('timeAttack');
+                        setTimeLimit(60); // default to 60s for time attack speedrun
+                        setInfiniteTime(false);
+                      }}
+                      className={`p-3.5 rounded-2xl flex flex-col gap-1 items-start text-left border transition-all cursor-pointer ${
+                        playModeType === 'timeAttack'
+                          ? 'bg-rose-50/40 border-rose-300 text-rose-950 ring-2 ring-rose-400/25 font-bold'
+                          : 'bg-white border-stone-200 text-slate-600 hover:bg-stone-50'
+                      }`}
+                    >
+                      <span className="text-xs font-black text-rose-700 flex items-center gap-1">
+                        ⚡ 極速限時模式
+                      </span>
+                      <span className="text-[10px] text-slate-400 leading-relaxed">
+                        時限內挑戰手速，字庫自動循環，打越多字分數越高！
+                      </span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Question Count Constraints Area */}
+                {playModeType === 'normal' ? (
+                  <div className="border-t border-stone-100 pt-4 flex flex-col gap-2.5">
+                    <span className="text-xs font-bold text-slate-500 flex items-center gap-1.5">
+                      <BookOpen className="w-4 h-4 text-slate-500" />
+                      題目數量選擇
+                    </span>
+                    
+                    <div className="grid grid-cols-4 gap-2">
+                      {[
+                        { label: '3 題', value: 3 },
+                        { label: '5 題', value: 5 },
+                        { label: '10 題', value: 10 },
+                        { label: '20 題', value: 20 }
+                      ].map((opt) => (
+                        <button
+                          key={opt.label}
+                          type="button"
+                          onClick={() => {
+                            setQuestionCountLimit(opt.value);
+                          }}
+                          className={`py-2 text-xs font-bold rounded-xl transition-all border cursor-pointer ${
+                            questionCountLimit === opt.value
+                              ? 'bg-amber-50 border-amber-300 text-amber-700 font-extrabold shadow-sm'
+                              : 'bg-white border-stone-200 text-slate-600 hover:bg-stone-50'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="border-t border-stone-100 pt-4 flex flex-col gap-1.5 google-classroom-accent">
+                    <span className="text-xs font-bold text-slate-500 flex items-center gap-1.5">
+                      <BookOpen className="w-4 h-4 text-rose-500" />
+                      題目數量限制
+                    </span>
+                    <div className="bg-rose-50/50 border border-rose-200/60 p-3 rounded-2xl text-[11px] text-rose-800 leading-relaxed font-bold">
+                      💡 <b>「限時模式」專屬機制：</b>時限內將不設題數上限！如果您的自訂題庫已打完，系統會自動在時限內循環出題，直到倒數結束為止！
+                    </div>
+                  </div>
+                )}
+
+                {/* Timer Constraints Area */}
+                <div className="border-t border-stone-100 pt-4 flex flex-col gap-2.5">
+                  <span className="text-xs font-bold text-slate-500 flex items-center gap-1.5">
+                    <Timer className="w-4 h-4 text-slate-500" />
+                    時間限制設定
+                  </span>
+                  
+                  <div className="grid grid-cols-4 gap-2">
+                    {[
+                      { label: '60 秒', value: 60, inf: false },
+                      { label: '3 分鐘', value: 180, inf: false },
+                      { label: '5 分鐘', value: 300, inf: false },
+                      { label: '不限時間', value: 9999, inf: true }
+                    ].map((opt) => (
+                      <button
+                        key={opt.label}
+                        type="button"
+                        onClick={() => {
+                          setTimeLimit(opt.value);
+                          setInfiniteTime(opt.inf);
+                        }}
+                        className={`py-2 text-xs font-bold rounded-xl transition-all border ${
+                          (infiniteTime && opt.inf) || (!infiniteTime && !opt.inf && timeLimit === opt.value)
+                            ? 'bg-amber-50 border-amber-300 text-amber-700 font-extrabold shadow-sm'
+                            : 'bg-white border-stone-200 text-slate-600 hover:bg-stone-50'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Custom Minutes and Seconds Time limit Setting */}
+                  <div className="flex items-center gap-2 mt-2.5 bg-stone-50 border border-stone-200/60 p-2.5 rounded-xl">
+                    <span className="text-[11px] text-slate-500 font-bold shrink-0">⏰ 自訂倒數秒數：</span>
+                    <input
+                      type="number"
+                      min="5"
+                      max="3600"
+                      value={infiniteTime ? '' : timeLimit}
+                      onChange={(e) => {
+                        const val = parseInt(e.target.value);
+                        if (!isNaN(val) && val > 0) {
+                          setTimeLimit(val);
+                          setInfiniteTime(false);
+                        }
+                      }}
+                      placeholder="自訂秒數"
+                      className="flex-1 max-w-[120px] bg-white border border-stone-200 rounded-lg px-2.5 py-1 text-xs focus:outline-none focus:border-amber-400 font-mono text-slate-800 font-extrabold focus:ring-1 focus:ring-amber-300"
+                    />
+                    <span className="text-[10px] text-slate-400 font-medium">秒 (範圍 5 至 3600 秒)</span>
+                  </div>
+                </div>
+
+                {/* Action Trigger Buttons */}
+                {textbook !== '1v1 PK 對戰' && (
+                  <div className="mt-2">
+                  {apiError && (
+                    <div className="mb-4 p-3 bg-red-50 text-red-800 rounded-xl border border-red-100 flex items-start gap-2 text-xs leading-relaxed">
+                      <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                      <div>
+                        <b>連線金鑰提示：</b>{apiError}
+                        <div className="text-[10px] text-red-500 mt-1">若尚未在 Secrets 設定 GEMINI_API_KEY，自訂題目仍可本機轉換播放！</div>
+                      </div>
+                    </div>
+                  )}
+
+                  {textbook === 'AI 主題產生' ? (
+                    <button
+                      id="ai_start_btn"
+                      onClick={handleAiGenerateTopic}
+                      disabled={loading}
+                      className="w-full bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-white font-bold py-3.5 px-4 rounded-xl shadow-lg shadow-amber-500/10 active:scale-95 transition-all text-sm flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
+                    >
+                      {loading ? (
+                        <>
+                          <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                          <span>AI 生成詞彙與注音中...請稍候</span>
+                        </>
+                      ) : (
+                        <>
+                          <Send className="w-4 h-4" />
+                          <span>開始 AI 主題產生考題</span>
+                        </>
+                      )}
+                    </button>
+                  ) : (
+                    <button
+                      id="custom_start_btn"
+                      onClick={handleCustomTextParse}
+                      disabled={loading}
+                      className="w-full bg-gradient-to-r from-emerald-600 to-emerald-700 hover:from-emerald-700 hover:to-emerald-800 text-white font-bold py-3.5 px-4 rounded-xl shadow-lg shadow-emerald-600/10 active:scale-95 transition-all text-sm flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
+                    >
+                      {loading ? (
+                        <>
+                          <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                          <span>解析漢字與注音庫中，請稍候</span>
+                        </>
+                      ) : (
+                        <>
+                          <FileText className="w-4 h-4" />
+                          <span>轉換自訂字句並開始挑戰</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+                </div>
+                )}
+              </div>
+
+              {/* Informational Board / Help pane */}
+              <div id="tutorial_info_deck" className="lg:col-span-5 flex flex-col gap-6">
+                
+                {/* Visual Keyboard Guide Banner */}
+                <div className="bg-stone-900 text-stone-100 p-6 rounded-3xl border border-stone-800 shadow-2xl relative overflow-hidden">
+                  <div className="absolute top-1/2 left-1/2 w-64 h-64 bg-amber-500/10 rounded-full blur-3xl -translate-x-1/2 -translate-y-1/2" />
+                  
+                  <div className="relative">
+                    <h3 className="text-base font-extrabold text-amber-400 flex items-center gap-2">
+                      <KeyboardIcon className="w-5 h-5 text-amber-400" />
+                      專用「模擬英文輸入」機制
+                    </h3>
+                    
+                    <p className="text-xs text-stone-300 mt-2.5 leading-relaxed">
+                      為了防止瀏覽器原生中文輸入法（如微軟注音）產生的選字視窗、聯想詞干擾練習，本軟體採用<b>直接攔截實體鍵盤 (English Key Layout)</b> 的高感度設計！
+                    </p>
+
+                    <div className="mt-4 p-3.5 bg-stone-800/80 rounded-2xl border border-stone-700 flex flex-col gap-2.5">
+                      <div className="text-xs font-bold text-amber-200">🔑 玩家操作步驟：</div>
+                      <ol className="text-xs text-stone-300 list-decimal list-inside flex flex-col gap-1.5">
+                        <li>確認已將電腦輸入法切換至 <span className="px-1.5 py-0.5 bg-stone-900 border border-stone-600 rounded font-mono text-[10px] text-amber-300 font-extrabold">英文/半形</span> 狀態。</li>
+                        <li>眼睛盯著中央的中文字。</li>
+                        <li>直接敲擊對應的英文鍵（例如輸入「河 ㄏㄜˊ」，鍵盤敲擊 <span className="font-mono bg-stone-950 px-1 rounded border border-stone-700">c</span> + <span className="font-mono bg-stone-950 px-1 rounded border border-stone-700">k</span> + <span className="font-mono bg-stone-950 px-1 rounded border border-stone-700">6</span>）。</li>
+                        <li>聲調代號對應：
+                          <div className="grid grid-cols-2 gap-1.5 mt-2 pl-4 text-[11px] text-stone-400">
+                            <span>2 聲 (ˊ)：鍵盤 <span className="font-mono bg-stone-950 px-1 rounded">6</span></span>
+                            <span>3 聲 (ˇ)：鍵盤 <span className="font-mono bg-stone-950 px-1 rounded">3</span></span>
+                            <span>4 聲 (ˋ)：鍵盤 <span className="font-mono bg-stone-950 px-1 rounded">4</span></span>
+                            <span>輕 聲 (˙)：鍵盤 <span className="font-mono bg-stone-950 px-1 rounded">7</span></span>
+                            <span className="col-span-2">1 聲 (ˉ/無)：敲完最後一個韻母，直接按 <span className="font-mono bg-stone-950 px-1 rounded text-amber-300">空白鍵</span>。</span>
+                          </div>
+                        </li>
+                      </ol>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Grade Statistics Banner */}
+                <div className="bg-amber-50 border border-amber-200/65 p-6 rounded-3xl flex flex-col gap-3">
+                  <h4 className="text-sm font-extrabold text-amber-800 flex items-center gap-1.5">
+                    <Award className="w-5 h-5 text-amber-600" />
+                    學習要點說明
+                  </h4>
+                  <ul className="text-xs text-slate-600 flex flex-col gap-2 list-disc list-inside leading-relaxed">
+                    <li>本系統中間字庫<b>不顯示任何注音提示</b>，旨在強迫學童在大腦中進行「國字讀音解碼」。</li>
+                    <li>極速輸入拼音：拼寫正確立即前進下一個字母，打字一律不累積多餘贅字、無延遲。</li>
+                    <li>隨時能利用鍵盤 <span className="font-mono px-1 py-0.5 bg-white border border-stone-300 rounded text-[10px]">Backspace</span> 刪除已敲字母，安全方便。</li>
+                  </ul>
                 </div>
               </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
 
-      {/* Delete Confirmation Overlay */}
-      <AnimatePresence>
-        {projectToDelete && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-            <motion.div 
+            </motion.div>
+          )}
+
+          {/* ==================== 2. MAIN ACTIVE PLAY GAMEPLAY ==================== */}
+          {gameMode === 'play' && activeWord && (
+            <motion.div
+              key="play_screen"
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="absolute inset-0 bg-black/40 backdrop-blur-sm"
-              onClick={() => setProjectToDelete(null)}
-            />
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.9, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="relative bg-white p-8 rounded-3xl shadow-2xl max-w-sm w-full text-center border border-zinc-100"
+              className="max-w-4xl mx-auto w-full flex flex-col gap-6"
             >
-              <div className="w-16 h-16 bg-rose-50 text-rose-500 rounded-2xl flex items-center justify-center mx-auto mb-6">
-                <Trash2 className="w-8 h-8" />
+              {/* PK Mode Live Duel Status Scoreboard */}
+              {textbook === '1v1 PK 對戰' && pkRoomState && (
+                <div className="bg-gradient-to-r from-orange-400 to-amber-500 p-0.5 rounded-3xl shadow-xl border border-orange-300">
+                  <div className="bg-amber-950/95 text-white rounded-[22px] px-5 py-4 flex flex-col gap-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-black uppercase tracking-wider text-amber-300 flex items-center gap-1.5 animate-pulse">
+                        ⚔️ 1v1 線上即時拼字對抗賽
+                      </span>
+                      <span className="text-[10px] bg-amber-500/20 border border-amber-500/40 px-2 py-0.5 rounded-full text-amber-400 font-mono font-bold">
+                        對決房號: {pkRoomCode}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4">
+                      {Object.values(pkRoomState.players).map((p: any) => {
+                        const isMe = p.username === pkUsername;
+                        return (
+                          <div key={p.username} className="flex flex-col gap-1.5 px-2 first:border-r first:border-amber-950/40">
+                            <div className="flex items-center justify-between">
+                              <span className={`text-xs font-extrabold flex items-center gap-1.5 ${isMe ? 'text-amber-300' : 'text-stone-300'}`}>
+                                {isMe ? '🧑‍💻' : '🧑‍🏫'} {p.username} {isMe && '(你)'}
+                              </span>
+                              <span className="text-xs font-black font-mono text-amber-400">
+                                {p.score || 0} 分
+                              </span>
+                            </div>
+
+                            <div className="w-full bg-stone-900/80 h-3 rounded-full overflow-hidden p-[2px] border border-stone-800">
+                              <div 
+                                className={`h-full rounded-full transition-all duration-300 ${isMe ? 'bg-gradient-to-r from-amber-400 to-yellow-300' : 'bg-gradient-to-r from-sky-400 to-blue-300'}`}
+                                style={{ width: `${Math.min(100, Math.max(12, ((p.completedCount || 0) / (selectedWords.length || 10)) * 100))}%` }}
+                              />
+                            </div>
+
+                            <div className="flex justify-between text-[10px] text-stone-400 font-medium font-mono">
+                              <span>答對: {p.completedCount || 0} 詞</span>
+                              <span>正確率: {p.accuracy || 100}%</span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Stat Strip bar */}
+              <div id="game_stats_bar" className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                
+                {/* 1. Timer Countdown */}
+                <div className="bg-white p-3 rounded-2xl border border-stone-200 flex items-center gap-2.5">
+                  <div className="p-2.5 bg-rose-50 text-rose-600 rounded-xl">
+                    <Timer className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-slate-400 font-bold">剩餘時間</div>
+                    <div className="text-base font-black font-mono text-slate-800">
+                      {infiniteTime ? '無限制' : `${timeRemaining} 秒`}
+                    </div>
+                  </div>
+                </div>
+
+                {/* 2. Completed / Total Words progress */}
+                <div className="bg-white p-3 rounded-2xl border border-stone-200 flex items-center gap-2.5">
+                  <div className="p-2.5 bg-amber-50 text-amber-600 rounded-xl">
+                    <BookOpen className="w-5 h-5 animate-bounce" />
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-slate-400 font-bold">
+                      {playModeType === 'timeAttack' ? '已拼對詞數' : '進度個數'}
+                    </div>
+                    <div className="text-base font-black text-slate-800">
+                      {playModeType === 'timeAttack' 
+                        ? `${completedWordItems.length} 個` 
+                        : `${currentWordIndex + 1} / ${selectedWords.length} 個`}
+                    </div>
+                  </div>
+                </div>
+
+                {/* 3. Accuracy level */}
+                <div className="bg-white p-3 rounded-2xl border border-stone-200 flex items-center gap-2.5">
+                  <div className="p-2.5 bg-emerald-50 text-emerald-600 rounded-xl">
+                    <Activity className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-slate-400 font-bold">正確率</div>
+                    <div className="text-base font-black font-mono text-emerald-600">
+                      {accuracyPercent}%
+                    </div>
+                  </div>
+                </div>
+
+                {/* 4. Speed (Characters Per Minute) */}
+                <div className="bg-white p-3 rounded-2xl border border-stone-200 flex items-center gap-2.5">
+                  <div className="p-2.5 bg-blue-50 text-blue-600 rounded-xl">
+                    <Award className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-slate-400 font-bold">速度倍乘</div>
+                    <div className="text-sm font-bold text-blue-600 flex items-center gap-1">
+                      <span>{cpmSpeed} CPM</span>
+                      <span className="text-[10px] bg-blue-100 text-blue-800 px-1 py-0.2 rounded">
+                        x{stats.multiplier}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 5. Game score */}
+                <div className="bg-white p-3 rounded-2xl border border-stone-200 col-span-2 md:col-span-1 flex items-center gap-2.5">
+                  <div className="p-2.5 bg-indigo-50 text-indigo-600 rounded-xl">
+                    <Sparkles className="w-5 h-5 text-indigo-500 animate-spin" />
+                  </div>
+                  <div className="flex-1">
+                    <div className="text-[10px] text-slate-400 font-bold font-sans">當前得積分</div>
+                    <div className="text-base font-black text-indigo-600 font-mono">
+                      {stats.score}
+                    </div>
+                  </div>
+                </div>
+
               </div>
-              <h3 className="text-xl font-bold text-zinc-900">永久刪除家庭？</h3>
-              <p className="text-sm text-zinc-500 mt-2 leading-relaxed">
-                確定要刪除「<span className="font-bold text-zinc-700">{projects.find(p => p.id === projectToDelete)?.name}</span>」嗎？<br />此動作將無法復原。
-              </p>
-              <div className="grid grid-cols-2 gap-3 mt-8">
-                 <button 
-                  onClick={() => setProjectToDelete(null)} 
-                  className="py-3 bg-zinc-100 text-zinc-600 rounded-2xl text-sm font-bold hover:bg-zinc-200 transition-colors"
-                >
-                  取消
-                </button>
-                 <button 
-                  onClick={() => deleteProject(projectToDelete)} 
-                  className="py-3 bg-rose-600 text-white rounded-2xl text-sm font-bold hover:bg-rose-700 transition-shadow shadow-lg shadow-rose-100"
-                >
-                  確定刪除
-                </button>
+
+              {/* Core Presentation Arena */}
+              <div 
+                id="word_arena_panel" 
+                className={`bg-white p-8 md:p-12 rounded-3xl border transition-all duration-150 relative overflow-hidden flex flex-col items-center justify-center min-h-[340px] ${
+                  wrongAnswer
+                    ? 'border-red-400 bg-red-50/15 shadow-xl shadow-red-100/30'
+                    : wrongKeyFlash 
+                      ? 'border-orange-400 bg-orange-50/10 shadow-lg' 
+                      : 'border-stone-200/90 shadow-2xl shadow-stone-100/30'
+                }`}
+              >
+                {/* School blackboard accent background to support cozy classroom theme */}
+                <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-amber-400 via-yellow-400 to-emerald-400" />
+                
+                {/* Source marker badge */}
+                <div className="absolute top-4 left-4 flex gap-1.5 items-center">
+                  <span className="text-[10px] bg-stone-100 text-slate-500 font-extrabold px-2.5 py-1 rounded-lg border border-stone-200/50 uppercase tracking-wider">
+                    練習模式：{textbook}
+                  </span>
+                  {playModeType === 'timeAttack' && (
+                    <span className="text-[10px] bg-rose-100 text-rose-700 font-black px-2 py-0.5 rounded-md border border-rose-200 animate-pulse">
+                      ⚡ 極速限時倒數中
+                    </span>
+                  )}
+                </div>
+
+                {/* Floating controls */}
+                <div className="absolute top-4 right-4 flex gap-2">
+                  <button
+                    onClick={() => {
+                      setShowHint(true);
+                      setTimeout(() => setShowHint(false), 2000);
+                    }}
+                    className="p-1 px-2 text-[10px] font-extrabold bg-stone-100 hover:bg-stone-200 text-slate-500 rounded-lg flex items-center gap-1 cursor-pointer"
+                    title="短暫顯示當前注音 2 秒，可協助卡關時過關"
+                  >
+                    <HelpCircle className="w-3 h-3" />
+                    注音提示
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      if (confirm('確定要放棄並重新開始設定嗎？')) {
+                        setGameMode('setup');
+                        setTimerActive(false);
+                      }
+                    }}
+                    className="p-1 px-2 text-[10px] font-bold bg-stone-100 hover:bg-red-50 hover:text-red-700 text-slate-500 rounded-lg flex items-center gap-1 cursor-pointer"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    重新設定
+                  </button>
+                </div>
+
+                {/* Big word question display (BOPOMOFO HIDDEN) */}
+                <div className="flex flex-col items-center gap-6 mt-4 w-full">
+                  <div className="text-[11px] font-extrabold text-slate-400 uppercase tracking-widest">當前拼音題字</div>
+                  
+                  {/* Huge Chinese characters */}
+                  <div className="flex items-center gap-1.5 text-slate-900 justify-center">
+                    {Array.from(activeWord.word).map((character, idx) => {
+                      const isActiveChar = idx === currentCharacterIndex;
+                      const isCompletedChar = idx < currentCharacterIndex;
+
+                      return (
+                        <div
+                          key={idx}
+                          onClick={() => setCurrentCharacterIndex(idx)}
+                          className={`flex flex-col items-center relative py-1 px-3.5 rounded-2xl transition-all duration-300 cursor-pointer ${
+                            isActiveChar 
+                              ? 'bg-amber-50/50 scale-110 border-2 border-dashed border-amber-300/80 shadow-md ring-4 ring-amber-400/5' 
+                              : isCompletedChar 
+                                ? 'text-emerald-600 bg-emerald-50/20 opacity-70' 
+                                : 'text-slate-400 scale-95 opacity-50 hover:opacity-80'
+                          }`}
+                        >
+                          <span className="text-7xl md:text-8xl font-black font-serif select-none">
+                            {character}
+                          </span>
+                          
+                          {/* Progress indicator bubble */}
+                          <div className="absolute -top-3 bg-white border px-2 py-0.5 rounded-full text-[9px] font-extrabold shadow-sm">
+                            {isActiveChar ? '拼寫中' : isCompletedChar ? '完成 ✓' : '等待'}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {wrongAnswer && (
+                    <div className="bg-rose-50 text-rose-800 border border-rose-200/60 px-5 py-2 rounded-2xl text-xs font-bold leading-relaxed shadow-sm flex items-center gap-2 animate-bounce">
+                      <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                      <span>答案拼寫不完全或不正確，請修改後再次按「Enter鍵」送出</span>
+                    </div>
+                  )}
+
+                  {/* Character slot spellers */}
+                  <div className="flex flex-wrap items-center justify-center gap-4 w-full max-w-2xl mt-2">
+                    {activeWord.characters.map((charItem, charIdx) => {
+                      const isActive = charIdx === currentCharacterIndex;
+                      const isPast = charIdx < currentCharacterIndex;
+                      
+                      // Explicitly get true sequence including space slots
+                      const sylSymbols = getCharacterTargetSymbols(charItem.bopomofo);
+                      const typedSymbols = typedWordSymbols[charIdx] || [];
+
+                      // Calculate correctness of this specific character in real-time
+                      let isCharCorrect = true;
+                      if (typedSymbols.length !== sylSymbols.length) {
+                        isCharCorrect = false;
+                      } else {
+                        for (let sIdx = 0; sIdx < sylSymbols.length; sIdx++) {
+                          const eSym = sylSymbols[sIdx];
+                          const tSym = typedSymbols[sIdx];
+                          if (eSym === ' ' || eSym === 'ˉ') {
+                            if (tSym !== ' ' && tSym !== 'ˉ') {
+                              isCharCorrect = false;
+                              break;
+                            }
+                          } else if (tSym !== eSym) {
+                            isCharCorrect = false;
+                            break;
+                          }
+                        }
+                      }
+
+                      // Check if any symbols typed so far are incorrect (real-time error checking)
+                      // Determine if this character box has an error or is incorrect (only after submitting)
+                      const hasError = wrongAnswer && wrongCharIndices.includes(charIdx);
+                      const isCorrectlyFinished = wrongAnswer && !wrongCharIndices.includes(charIdx);
+
+                      return (
+                        <div 
+                          key={charIdx}
+                          onClick={() => setCurrentCharacterIndex(charIdx)}
+                          className={`p-4 rounded-2xl border-2 flex flex-col items-center gap-3 transition-all duration-300 cursor-pointer flex-1 min-w-[160px] ${
+                            hasError
+                              ? 'border-red-500 bg-red-50/50 shadow-md shadow-red-100/20 ring-2 ring-red-400/20 scale-102 animate-shake'
+                              : isCorrectlyFinished
+                                ? 'border-emerald-500 bg-emerald-50/15 shadow-md shadow-emerald-100/10'
+                                : isActive
+                                  ? 'border-amber-400 bg-amber-50/15 shadow-lg shadow-amber-100/10 scale-105 ring-2 ring-amber-300/20'
+                                  : 'border-stone-200 bg-stone-50/40 hover:bg-stone-100/80 opacity-70'
+                          }`}
+                        >
+                          <span className={`text-xs font-extrabold font-serif flex items-center gap-1 ${
+                            hasError ? 'text-red-700' : isCorrectlyFinished ? 'text-emerald-700' : 'text-slate-500'
+                          }`}>
+                            {hasError ? '❌' : isCorrectlyFinished ? '✓' : '🎯'} 「{charItem.char}」的注音符號
+                          </span>
+
+                          <div className="flex items-center gap-2">
+                            {sylSymbols.map((sym, symbolIdx) => {
+                              const typedForChar = typedWordSymbols[charIdx] || [];
+                              const isFilled = symbolIdx < typedForChar.length;
+                              const isCurrentlyTarget = isActive && symbolIdx === typedForChar.length;
+                              
+                              // Real-time symbol correctness check (only activates after submit has marked error)
+                              let isSymbolIncorrect = false;
+                              if (hasError && symbolIdx < typedForChar.length) {
+                                const eSym = sym;
+                                const tSym = typedForChar[symbolIdx];
+                                if (eSym === ' ' || eSym === 'ˉ') {
+                                  if (tSym !== ' ' && tSym !== 'ˉ') {
+                                    isSymbolIncorrect = true;
+                                  }
+                                } else if (tSym !== eSym) {
+                                  isSymbolIncorrect = true;
+                                }
+                              }
+
+                              let displaySymbol = '';
+                              if (symbolIdx < typedForChar.length) {
+                                const t = typedForChar[symbolIdx];
+                                displaySymbol = t === ' ' ? 'ˉ' : t;
+                              }
+
+                              return (
+                                <div
+                                  key={symbolIdx}
+                                  className={`w-11 h-13 rounded-xl flex flex-col items-center justify-center text-lg font-black font-mono transition-all border ${
+                                    isSymbolIncorrect
+                                      ? 'bg-red-100 border-red-300 text-red-700 font-bold'
+                                      : isCorrectlyFinished
+                                        ? 'bg-emerald-50 border-emerald-300 text-emerald-700'
+                                        : isFilled
+                                          ? hasError
+                                            ? 'bg-emerald-50 border-emerald-200 text-emerald-600 opacity-80' // Correct symbol in failed card
+                                            : 'bg-amber-400 border-amber-500 text-slate-800 scale-105'
+                                          : isCurrentlyTarget
+                                            ? 'bg-white border-amber-400 text-slate-400 animate-bounce shadow-sm ring-2 ring-amber-300'
+                                            : 'bg-stone-50 border-stone-200 text-slate-200'
+                                  }`}
+                                >
+                                  <span className="leading-none">{displaySymbol}</span>
+                                </div>
+                              );
+                            })}
+                          </div>
+
+                          {/* Temporary help hint text if trigger toggled */}
+                          {(showHint || highlightHelper) && isActive && (
+                            <div className="text-[10px] font-extrabold text-amber-700 bg-amber-100/70 px-2.5 py-0.5 rounded-full animate-pulse">
+                              解答提示：{charItem.bopomofo || '無'}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Submit Shortcuts Button Strip Panel */}
+                  <div className="flex flex-col sm:flex-row items-center gap-3 mt-4 w-full justify-center max-w-md">
+                    <button
+                      id="skip_question_btn"
+                      type="button"
+                      onClick={handleSkipWord}
+                      className="px-5 py-2.5 bg-stone-100 hover:bg-stone-200 text-stone-600 rounded-xl font-bold text-xs active:scale-95 transition-all text-center flex items-center justify-center gap-1.5 cursor-pointer flex-1 w-full border border-stone-200"
+                    >
+                      <span>跳過此題 [ 按 <b>Tab</b> 鍵 ]</span>
+                    </button>
+
+                    <button
+                      id="submit_word_btn"
+                      type="button"
+                      onClick={handleSubmitWord}
+                      className="px-5 py-2.5 bg-amber-500 hover:bg-amber-600 text-white rounded-xl font-black text-xs active:scale-95 transition-all text-center flex items-center justify-center gap-1.5 cursor-pointer flex-1 w-full shadow-md shadow-amber-500/15"
+                    >
+                      <span>確認送出 [ 按 <b>Enter</b> 鍵 ]</span>
+                    </button>
+                  </div>
+
+                  {/* Word dictionary definition label */}
+                  {activeWord.meaning && (
+                    <p className="text-xs text-slate-400 max-w-md text-center line-clamp-2 italic leading-relaxed border-t border-stone-100 pt-3.5 px-4">
+                      詞義辭源：{activeWord.meaning}
+                    </p>
+                  )}
+
+                  <div className="text-[10px] text-slate-400/80 mt-1 uppercase tracking-widest font-bold">
+                    請按鍵盤輸入注音，或點選下方軟鍵盤。Backspace 鍵可刪除
+                  </div>
+
+                </div>
+
+              </div>
+
+              {/* ==================== BOPOMOFO HIGH-FIDELITY CHASSIS KEYBOARD ==================== */}
+              <div id="keyboard_panel" className="bg-stone-100 p-4 sm:p-5 rounded-3xl border border-stone-200 shadow-md">
+                
+                {/* 4 Rows of standard Taiwanese layout */}
+                <div className="flex flex-col gap-2">
+                  {[
+                    // Row 1
+                    ['ㄅ', 'ㄉ', 'ˇ', 'ˋ', 'ㄓ', 'ˊ', '˙', 'ㄚ', 'ㄞ', 'ㄢ', 'ㄦ'],
+                    // Row 2
+                    ['ㄆ', 'ㄊ', 'ㄍ', 'ㄐ', 'ㄔ', 'ㄗ', 'ㄧ', 'ㄛ', 'ㄟ', 'ㄣ'],
+                    // Row 3
+                    ['ㄇ', 'ㄋ', 'ㄎ', 'ㄑ', 'ㄕ', 'ㄘ', 'ㄨ', 'ㄜ', 'ㄠ', 'ㄤ'],
+                    // Row 4
+                    ['ㄈ', 'ㄌ', 'ㄏ', 'ㄒ', 'ㄖ', 'ㄙ', 'ㄩ', 'ㄝ', 'ㄡ', 'ㄥ']
+                  ].map((row, rowIdx) => (
+                    <div key={rowIdx} className="flex justify-center gap-1 sm:gap-1.5 w-full">
+                      {row.map((symbol) => {
+                        const qwertyKey = BOPOMOFO_TO_KEY[symbol] || '';
+                        
+                        // Check active status
+                        const isActivePressed = physicalKeyPress === symbol;
+                        
+                        // Check if this key corresponds to the exact correct next key
+                        const currentTypedForAc = typedWordSymbols[currentCharacterIndex] || [];
+                        const correctNextSymbol = targetSymbols[currentTypedForAc.length];
+                        const isHintRecommended = highlightHelper && correctNextSymbol === symbol;
+
+                        return (
+                          <button
+                            key={symbol}
+                            type="button"
+                            onClick={() => handleBopomofoInput(symbol)}
+                            className={`flex flex-col items-center justify-between p-1 sm:p-2 h-10 sm:h-12 flex-1 max-w-[56px] rounded-lg sm:rounded-xl border transition-all cursor-pointer ${
+                              isActivePressed
+                                ? 'bg-amber-500 text-white border-amber-600 scale-90 translate-y-0.5'
+                                : isHintRecommended
+                                  ? 'bg-emerald-400 text-slate-900 border-emerald-500 scale-105 font-black ring-4 ring-emerald-300 animate-pulse shadow-md'
+                                  : 'bg-white border-stone-300/80 text-slate-700 hover:bg-stone-50 hover:border-stone-400 active:scale-95'
+                            }`}
+                          >
+                            <span className="text-sm sm:text-base font-black font-mono leading-none">
+                              {symbol}
+                            </span>
+                            <span className="text-[8px] sm:text-[9px] font-extrabold text-slate-400 uppercase leading-none font-mono">
+                              {qwertyKey}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ))}
+
+                  {/* Spacebar Row */}
+                  <div className="flex justify-center gap-1 sm:gap-1.5 w-full mt-1">
+                    {/* Backspace utility */}
+                    <button
+                      type="button"
+                      onClick={handleBackspace}
+                      className="px-4 h-10 sm:h-12 rounded-lg sm:rounded-xl border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100 font-extrabold text-xs active:scale-95 cursor-pointer uppercase flex items-center justify-center gap-1"
+                    >
+                      <span>倒退</span>
+                      <span className="text-[9px] text-rose-500 font-mono">Back</span>
+                    </button>
+
+                    {/* True Spacebar Mapping First tone */}
+                    <button
+                      type="button"
+                      onClick={() => handleBopomofoInput(' ')}
+                      className={`h-10 sm:h-12 flex-1 max-w-sm rounded-lg sm:rounded-xl border transition-all cursor-pointer flex flex-col items-center justify-center leading-none ${
+                        physicalKeyPress === ' ' || physicalKeyPress === 'ˉ'
+                          ? 'bg-amber-500 text-white border-amber-600'
+                          : highlightHelper && (targetSymbols[(typedWordSymbols[currentCharacterIndex] || []).length] === ' ' || targetSymbols[(typedWordSymbols[currentCharacterIndex] || []).length] === 'ˉ' || targetSymbols[(typedWordSymbols[currentCharacterIndex] || []).length] === undefined)
+                            ? 'bg-emerald-400 text-slate-900 border-emerald-500 ring-4 ring-emerald-300 font-bold'
+                            : 'bg-white border-stone-300 text-slate-700 hover:bg-stone-50'
+                      }`}
+                    >
+                      <span className="text-xs sm:text-sm font-black leading-none">空白鍵 SPACE ˉ</span>
+                      <span className="text-[8px] sm:text-[9px] text-slate-400 mt-1">（一聲 / 確認前進）</span>
+                    </button>
+                  </div>
+
+                </div>
+
               </div>
             </motion.div>
+          )}
+
+          {/* ==================== 3. ANALYTICS RESULT SCREEN ==================== */}
+          {gameMode === 'result' && (
+            <motion.div
+              key="result_screen"
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0 }}
+              className="max-w-2xl mx-auto w-full bg-white p-8 md:p-10 rounded-3xl border border-stone-200 shadow-2xl relative"
+            >
+              <div className="absolute top-0 left-0 right-0 h-2 bg-gradient-to-r from-amber-400 via-amber-500 to-emerald-500 rounded-t-3xl" />
+
+              <div className="flex flex-col items-center text-center gap-6 mt-2">
+                <div className="w-20 h-20 bg-amber-50 rounded-full flex items-center justify-center border-4 border-amber-200 text-amber-500 animate-spin">
+                  <Sparkles className="w-10 h-10 text-amber-500" />
+                </div>
+
+                <div>
+                  <h2 className="text-2xl font-black text-slate-900 leading-tight">學習解析報告</h2>
+                  <p className="text-xs text-slate-400 mt-1">
+                    恭喜您完成挑戰！以下是您本次注音打字大進擊的學習數據：
+                  </p>
+                </div>
+
+                {/* Score Canvas Grid */}
+                <div className="grid grid-cols-2 gap-4 w-full mt-4">
+                  
+                  {/* Score */}
+                  <div className="bg-stone-50 p-4 rounded-2xl border border-stone-100 flex flex-col justify-center">
+                    <span className="text-[10px] text-slate-400 font-black uppercase tracking-wider">打字總積分</span>
+                    <span className="text-3xl font-black text-indigo-600 mt-1 font-mono">{stats.score} 分</span>
+                  </div>
+
+                  {/* Words Spelled */}
+                  <div className="bg-stone-50 p-4 rounded-2xl border border-stone-100 flex flex-col justify-center">
+                    <span className="text-[10px] text-slate-400 font-black uppercase tracking-wider">拼出總詞量</span>
+                    <span className="text-3xl font-black text-slate-800 mt-1 font-mono">{stats.completedCount} 個詞</span>
+                  </div>
+
+                  {/* Accuracy rate */}
+                  <div className="bg-stone-50 p-4 rounded-2xl border border-stone-100 flex flex-col justify-center">
+                    <span className="text-[10px] text-slate-400 font-black uppercase tracking-wider">精準正確率</span>
+                    <span className="text-3xl font-black text-emerald-600 mt-1 font-mono">{accuracyPercent}%</span>
+                  </div>
+
+                  {/* Typing CPM Speed */}
+                  <div className="bg-stone-50 p-4 rounded-2xl border border-stone-100 flex flex-col justify-center">
+                    <span className="text-[10px] text-slate-400 font-black uppercase tracking-wider">按鍵速度 (CPM)</span>
+                    <span className="text-3xl font-black text-blue-600 mt-1 font-mono">{cpmSpeed} 字/分</span>
+                  </div>
+
+                </div>
+
+                {/* 1v1 PK 對戰 Results Score comparison Section */}
+                {textbook === '1v1 PK 對戰' && pkRoomState && (
+                  <div className="w-full bg-gradient-to-r from-orange-100 to-amber-100 p-5 rounded-2xl border border-amber-300 flex flex-col gap-4 text-left mt-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xl">🏆</span>
+                      <span className="text-sm font-black text-amber-950 uppercase tracking-widest">
+                        PK 對抗戰統計成績單
+                      </span>
+                    </div>
+
+                    <div className="flex flex-col gap-2.5">
+                      {Object.values(pkRoomState.players).map((p: any) => {
+                        const isMe = p.username === pkUsername;
+                        const isFinished = p.isFinished;
+                        
+                        return (
+                          <div 
+                            key={p.username}
+                            className={`p-3.5 rounded-xl border flex flex-col gap-2 transition-all ${
+                              isMe 
+                                ? 'bg-white border-amber-450 shadow-sm' 
+                                : 'bg-white/85 border-stone-250'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs font-extrabold text-slate-800 flex items-center gap-1.5">
+                                {isMe ? `🧑‍💻 我的戰績：${p.username}` : `🧑‍🏫 對戰對手：${p.username}`}
+                              </span>
+                              <span className="text-sm font-black text-rose-600 font-mono">
+                                {p.score || 0} 分
+                              </span>
+                            </div>
+
+                            <div className="grid grid-cols-3 gap-2 text-center text-[10px] font-bold text-slate-500">
+                              <div className="bg-stone-50 p-1.5 rounded-lg border border-stone-100">
+                                <div>合格拼對</div>
+                                <div className="text-xs text-slate-800 font-black mt-0.5">{p.completedCount || 0} 詞</div>
+                              </div>
+                              <div className="bg-stone-50 p-1.5 rounded-lg border border-stone-100">
+                                <div>正確率</div>
+                                <div className="text-xs text-emerald-700 font-black mt-0.5">{p.accuracy || 100}%</div>
+                              </div>
+                              <div className="bg-stone-50 p-1.5 rounded-lg border border-stone-100">
+                                <div>對戰狀態</div>
+                                <div className={`text-xs font-black mt-0.5 ${isFinished ? 'text-blue-700' : 'text-orange-500 animate-pulse'}`}>
+                                  {isFinished ? '已完成 🏁' : '奮力拼寫中...'}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* Dynamic Winner crown announcement! */}
+                    {Object.values(pkRoomState.players).every((p: any) => p.isFinished) && (
+                      <div className="bg-emerald-700 text-white rounded-xl p-3.5 text-center flex flex-col items-center justify-center gap-1 shadow-md">
+                        <span className="text-lg">👑 本場拼字大擂台贏家 👑</span>
+                        <div className="text-sm font-black mt-1">
+                          {(() => {
+                            const players = Object.values(pkRoomState.players) as any[];
+                            if (players.length < 2) return `恭喜 ${pkUsername} 獨佔鰲頭！`;
+                            const p1 = players[0];
+                            const p2 = players[1];
+                            if (p1.score > p2.score) return `恭喜 【${p1.username}】 榮登拼音之冠！`;
+                            if (p2.score > p1.score) return `恭喜 【${p2.username}】 榮登拼音之冠！`;
+                            return '雙方平分秋色，握手言和！';
+                          })()}
+                        </div>
+                        <span className="text-[10px] text-emerald-200 mt-0.5">反應流暢且聲調完全到位，簡直是注音神射手！</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Completed words tags */}
+                {completedWordItems.length > 0 && (
+                  <div className="w-full text-left mt-2">
+                    <span className="text-xs font-bold text-slate-400 uppercase tracking-widest block mb-2">本次拼寫成功字庫：</span>
+                    <div className="flex flex-wrap gap-1.5 max-h-36 overflow-y-auto p-2 bg-stone-50/50 rounded-2xl border border-stone-100">
+                      {completedWordItems.map((wordItem, idx) => (
+                        <div key={idx} className="flex items-center gap-1 text-xs bg-white border border-stone-200.text-slate-700 px-3 py-1 rounded-xl">
+                          <Check className="w-3.5 h-3.5 text-emerald-600" />
+                          <span className="font-bold">{wordItem.word}</span>
+                          <span className="text-[10px] text-slate-400">({wordItem.characters.map(c => c.bopomofo).join('')})</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Stats recap row */}
+                <p className="text-[10px] text-slate-400">
+                  總點擊按鍵：{totalKeystrokes} 次 | 錯誤拼鍵：{stats.incorrectCount} 次 | 耗時：{stats.totalTimeSpent} 秒
+                </p>
+
+                {/* Button actions */}
+                <div className="flex gap-4 w-full mt-2">
+                  <button
+                    onClick={() => {
+                      // Restart active lesson words list
+                      setCurrentWordIndex(0);
+                      setCurrentCharacterIndex(0);
+                      setTypedWordSymbols(selectedWords.length > 0 ? selectedWords[0].characters.map(() => []) : []);
+                      setWrongAnswer(false);
+                      setCompletedWordItems([]);
+                      setTimeRemaining(timeLimit);
+                      setGameMode('play');
+                      setTimerActive(true);
+                      setStats({
+                        correctCount: 0,
+                        incorrectCount: 0,
+                        completedCount: 0,
+                        startTime: Date.now(),
+                        totalTimeSpent: 0,
+                        multiplier: 1,
+                        score: 0
+                      });
+                    }}
+                    className="flex-1 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-white font-bold py-3 px-4 rounded-xl shadow-md cursor-pointer active:scale-95 transition-all text-sm flex items-center justify-center gap-1.5"
+                  >
+                    <RotateCcw className="w-4 h-4" />
+                    再挑戰一次
+                  </button>
+
+                  <button
+                    onClick={() => setGameMode('setup')}
+                    className="flex-1 bg-stone-100 hover:bg-stone-200 text-slate-700 font-bold py-3 px-4 rounded-xl cursor-pointer active:scale-95 transition-all text-sm border border-stone-200"
+                  >
+                    更換章節/設定
+                  </button>
+                </div>
+
+              </div>
+            </motion.div>
+          )}
+
+        </AnimatePresence>
+      </main>
+
+      {/* Footer copyright */}
+      <footer id="app_footer" className="text-center py-6 border-t border-stone-200 text-slate-400 text-xs flex flex-col gap-1 items-center bg-white/40">
+        <p>© 2026 注音輸入挑戰學堂 - 仿國小 1200 字及 3 分鐘打字練習模式設計</p>
+        <p className="opacity-80">
+          支援實體鍵盤（英文狀態）和螢幕觸控點擊 QWERTY 注音鍵盤對應
+        </p>
+      </footer>
+
+      {/* Synchronized Battle Countdown Overlay */}
+      {pkCountdown > 0 && (
+        <div className="fixed inset-0 bg-stone-950/85 backdrop-blur-lg flex flex-col items-center justify-center z-50">
+          <div className="text-center animate-bounce p-8">
+            <div className="text-[130px] md:text-[170px] font-black font-mono text-amber-400 leading-none drop-shadow-[0_10px_10px_rgba(0,0,0,0.5)]">
+              {pkCountdown}
+            </div>
+            <div className="text-xl font-black text-white tracking-widest mt-6 bg-amber-500/10 px-6 py-2 rounded-full border border-amber-500/30">
+              ⚔️ 兩台電腦已對齊！線上對擊同步載入中... ⚔️
+            </div>
           </div>
-        )}
-      </AnimatePresence>
-    </>
+        </div>
+      )}
+    </div>
   );
 }

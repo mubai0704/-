@@ -1,5 +1,6 @@
 {
-  "name": "家系圖繪製工具 初版",
-  "description": "畫家系圖",
-  "requestFramePermissions": []
+  "name": "Bopomofo Typing Practice",
+  "description": "An interactive Chinese Bopomofo typing practice game based on standard school textbooks and AI-generated custom vocabularies, where users type correct Bopomofo symbols without visual pronunciation hints.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
