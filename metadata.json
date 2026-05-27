@@ -1,6 +1,0 @@
-{
-  "name": "Bopomofo Typing Practice",
-  "description": "An interactive Chinese Bopomofo typing practice game based on standard school textbooks and AI-generated custom vocabularies, where users type correct Bopomofo symbols without visual pronunciation hints.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
